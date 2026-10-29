@@ -20,6 +20,11 @@ export const SAMPLES: SampleModel[] = [
     title: "ModelTime 1.5",
     file: "1790861177659-ModelTime1.5-1790860945337_413a.csv",
   },
+  {
+    id: "0582",
+    title: "GMZ-2025-0582",
+    file: "1788445045269-GMZ-2025-0582-RS-BIM-001-03_778f.csv",
+  },
 ];
 
 export function sampleUrl(file: string): string {

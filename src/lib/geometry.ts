@@ -38,6 +38,10 @@ export type DrawElement = {
   phaseField: string | null;
   /** Raw cell from `phaseField`. Empty when the column is missing or the cell is blank. */
   phaseValue: string;
+  /** Phase Demolished column, when the file has it. */
+  demolishedField: string | null;
+  /** Raw Phase Demolished cell. */
+  demolishedValue: string;
   /** Yes/no column, when the file has it. */
   structuralField: string | null;
   /** Raw cell from `structuralField`. */
@@ -53,6 +57,18 @@ export type DrawElement = {
   min: Vec3;
   max: Vec3;
   center: Vec3;
+  /** Set when this solid is a learned column marker, not a schedule row. */
+  recommendation?: {
+    projectId: string;
+    wallId: string;
+    slot: string;
+    probability: number;
+    alongParam: number;
+    lateralM: number;
+    wallLengthM: number;
+    reason: string;
+    placedOnWall: boolean;
+  };
 };
 
 export type SkipRecord = {
@@ -72,6 +88,8 @@ export type ParsedModel = {
   phaseField: string | null;
   /** Yes/no header used for the structural highlight, or null when that column is absent. */
   structuralField: string | null;
+  /** Phase Demolished header, or null when that column is absent. */
+  demolishedField: string | null;
 };
 
 /** The Revit phase column present in these exports. */
@@ -79,15 +97,33 @@ export const PHASE_FIELD = "Phase Created";
 
 export type PhaseKind = "existing" | "proposed" | "unmarked";
 
-export type PhaseHighlight = "off" | "existing" | "proposed" | "both";
+export type PhaseHighlight = "off" | "none" | "existing" | "proposed" | "both";
 
 /** Yes/no column present in these exports. 1 is yes. */
 export const STRUCTURAL_FIELD = "Structural";
 export const STRUCTURAL_YES = "1";
 export const STRUCTURAL_COLOR = "#d7263d";
 
-export function isStructuralValue(value: string): boolean {
-  return value.trim() === STRUCTURAL_YES;
+/** Revit category ids whose names are structural. */
+const STRUCTURAL_CATEGORY_IDS = new Set(["-2001320", "-2001330", "-2001300"]);
+
+export function isStructuralElement(element: {
+  elementType: string;
+  categoryId: string;
+  structuralValue: string;
+}): boolean {
+  if (element.structuralValue.trim() === STRUCTURAL_YES) return true;
+  if (element.elementType.toLowerCase().includes("structural")) return true;
+  return STRUCTURAL_CATEGORY_IDS.has(element.categoryId.trim());
+}
+
+/** Phase Demolished. None and blank mean the element is not demolished. */
+export const DEMOLISHED_FIELD = "Phase Demolished";
+export const DEMOLISHED_COLOR = "#0f766e";
+
+export function isDemolishedValue(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return normalized !== "" && normalized !== "none";
 }
 
 export const PHASE_LOOKS: Record<PhaseKind, { color: string; opacity: number; label: string }> = {
@@ -96,11 +132,14 @@ export const PHASE_LOOKS: Record<PhaseKind, { color: string; opacity: number; la
   unmarked: { color: "#d5dbe2", opacity: 0.38, label: "Unmarked" },
 };
 
-/** Classify a Phase Created cell. Any other value, including New Construction, stays unmarked. */
+/** Phase Created values that the Proposed filter treats as proposed. */
+const PROPOSED_PHASE_VALUES = new Set(["proposed", "new construction"]);
+
+/** Classify a Phase Created cell. Proposed and New Construction count as proposed. Any other value stays unmarked. */
 export function phaseKind(value: string): PhaseKind {
   const normalized = value.trim().toLowerCase();
   if (normalized === "existing") return "existing";
-  if (normalized === "proposed") return "proposed";
+  if (PROPOSED_PHASE_VALUES.has(normalized)) return "proposed";
   return "unmarked";
 }
 
@@ -223,6 +262,7 @@ export function parseModel(csvText: string, filename: string): ParsedModel {
   const headers = result.meta.fields ?? [];
   const phaseField = headers.includes(PHASE_FIELD) ? PHASE_FIELD : null;
   const structuralField = headers.includes(STRUCTURAL_FIELD) ? STRUCTURAL_FIELD : null;
+  const demolishedField = headers.includes(DEMOLISHED_FIELD) ? DEMOLISHED_FIELD : null;
   if (
     !["Boundary", "Location X", "Location Y", "Location Z", "Start X", "End X"].some(
       (header) => headers.includes(header),
@@ -296,6 +336,8 @@ export function parseModel(csvText: string, filename: string): ParsedModel {
       levelName: row["Base Constraint"] || row["Level"] || "",
       phaseField,
       phaseValue: phaseField ? (row[phaseField] ?? "").trim() : "",
+      demolishedField,
+      demolishedValue: demolishedField ? (row[demolishedField] ?? "").trim() : "",
       structuralField,
       structuralValue: structuralField ? (row[structuralField] ?? "").trim() : "",
       positions: placed.positions,
@@ -319,6 +361,7 @@ export function parseModel(csvText: string, filename: string): ParsedModel {
     fallbacks: [...fallbackCounts.entries()].map(([note, count]) => ({ note, count })),
     phaseField,
     structuralField,
+    demolishedField,
   };
 }
 
@@ -901,6 +944,21 @@ function meshFromRevitFaces(faces: Vec3[][]): Float32Array | null {
   return new Float32Array(buffer);
 }
 
+/** Square column in Revit feet (X/Y plan, Z up). Positions come back in view space. */
+export function verticalColumnMesh(
+  xFeet: number,
+  yFeet: number,
+  zBaseFeet: number,
+  zTopFeet: number,
+  sizeFeet: number,
+): Float32Array | null {
+  const height = zTopFeet - zBaseFeet;
+  if (!(height >= 0.05) || !(sizeFeet >= 0.02)) return null;
+  const center: Vec3 = [xFeet, yFeet, zBaseFeet + height / 2];
+  const half = sizeFeet / 2;
+  return boxPositions(center, [1, 0, 0], [0, 1, 0], [0, 0, 1], half, half, height / 2);
+}
+
 function boxPositions(
   center: Vec3,
   axisU: Vec3,
@@ -959,7 +1017,7 @@ function pushTriangle(buffer: number[], a: Vec3, b: Vec3, c: Vec3) {
   buffer.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
 }
 
-function boundsOf(positions: Float32Array): { min: Vec3; max: Vec3; center: Vec3 } {
+export function boundsOf(positions: Float32Array): { min: Vec3; max: Vec3; center: Vec3 } {
   let minX = Infinity;
   let minY = Infinity;
   let minZ = Infinity;

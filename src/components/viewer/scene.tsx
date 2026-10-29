@@ -5,19 +5,25 @@ import { Canvas } from "@react-three/fiber";
 import { memo, useEffect, useMemo } from "react";
 import * as THREE from "three";
 import {
+  DEMOLISHED_COLOR,
   PHASE_LOOKS,
   STRUCTURAL_COLOR,
-  isStructuralValue,
+  isDemolishedValue,
+  isStructuralElement,
   phaseKind,
   type DimensionLine,
   type DrawElement,
   type PhaseHighlight,
 } from "@/lib/geometry";
+import { type PlacedEdge, type PlacedNode } from "@/lib/graph";
+import { RECOMMENDED_COLOR, RECOMMENDED_OUTLINE } from "@/lib/recommendations";
 import { formatLengthShort } from "@/lib/units";
+import { GraphLayer } from "@/components/viewer/graph-layer";
 
 type SceneCanvasProps = {
   fitElements: DrawElement[];
   restElements: DrawElement[];
+  markerElements: DrawElement[];
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   frameToken: string;
@@ -25,11 +31,15 @@ type SceneCanvasProps = {
   gridSection: number;
   phaseHighlight: PhaseHighlight;
   structuralHighlight: boolean;
+  demolishedHighlight: boolean;
+  graphNodes: PlacedNode[];
+  graphEdges: PlacedEdge[];
 };
 
 export function SceneCanvas({
   fitElements,
   restElements,
+  markerElements,
   selectedId,
   onSelect,
   frameToken,
@@ -37,11 +47,16 @@ export function SceneCanvas({
   gridSection,
   phaseHighlight,
   structuralHighlight,
+  demolishedHighlight,
+  graphNodes,
+  graphEdges,
 }: SceneCanvasProps) {
   const selected = useMemo(
-    () => [...fitElements, ...restElements].find((element) => element.id === selectedId) ?? null,
-    [fitElements, restElements, selectedId],
+    () =>
+      [...fitElements, ...restElements, ...markerElements].find((element) => element.id === selectedId) ?? null,
+    [fitElements, restElements, markerElements, selectedId],
   );
+  const linkedIds = useMemo(() => linkedElementIds(graphEdges, selectedId), [graphEdges, selectedId]);
   const fade = useMemo(() => {
     const span = spanOf(fitElements.length ? fitElements : restElements);
     return Math.max(80, span * 1.8);
@@ -79,12 +94,14 @@ export function SceneCanvas({
           key={element.id}
           element={element}
           selected={element.id === selectedId}
+          linked={linkedIds.has(element.id)}
           phaseHighlight={phaseHighlight}
           structuralHighlight={structuralHighlight}
+          demolishedHighlight={demolishedHighlight}
           onSelect={onSelect}
         />
       ))}
-      {fitElements.length > 0 && (
+      {(fitElements.length > 0 || markerElements.length > 0) && (
         <Bounds key={frameToken} fit clip margin={1.28} maxDuration={0} observe={false}>
           <group>
             {fitElements.map((element) => (
@@ -92,25 +109,78 @@ export function SceneCanvas({
                 key={element.id}
                 element={element}
                 selected={element.id === selectedId}
+                linked={linkedIds.has(element.id)}
                 phaseHighlight={phaseHighlight}
                 structuralHighlight={structuralHighlight}
+                demolishedHighlight={demolishedHighlight}
+                onSelect={onSelect}
+              />
+            ))}
+            {markerElements.map((element) => (
+              <ElementMesh
+                key={element.id}
+                element={element}
+                selected={element.id === selectedId}
+                linked={linkedIds.has(element.id)}
+                phaseHighlight={phaseHighlight}
+                structuralHighlight={structuralHighlight}
+                demolishedHighlight={demolishedHighlight}
                 onSelect={onSelect}
               />
             ))}
           </group>
         </Bounds>
       )}
+      <GraphLayer nodes={graphNodes} edges={graphEdges} selectedId={selectedId} onSelect={onSelect} />
       {selected && <Dimensions lines={selected.dimensions} />}
       <OrbitControls makeDefault enableDamping dampingFactor={0.14} maxPolarAngle={Math.PI * 0.92} />
     </Canvas>
   );
 }
 
+/** Opacity for elements outside the Proposed or Demolished focus, so matches inside the building stay readable. */
+const GHOST_OPACITY = 0.15;
+/** Neighbours of the selected graph node. Softer than the gold selection so the two stay distinct. */
+const LINKED_COLOR = "#5eb0c8";
+const LINKED_EMISSIVE = "#1a6f8a";
+const LINKED_OUTLINE = "#13485c";
+
+function linkedElementIds(edges: { srcDrawnId: string; dstDrawnId: string }[], selectedId: string | null): Set<string> {
+  const ids = new Set<string>();
+  if (!selectedId) return ids;
+  for (const edge of edges) {
+    if (edge.srcDrawnId === selectedId) ids.add(edge.dstDrawnId);
+    else if (edge.dstDrawnId === selectedId) ids.add(edge.srcDrawnId);
+  }
+  ids.delete(selectedId);
+  return ids;
+}
+
+function phaseApplies(element: DrawElement, phaseHighlight: PhaseHighlight): boolean {
+  if (phaseHighlight === "off" || phaseHighlight === "none") return false;
+  const kind = phaseKind(element.phaseValue);
+  const highlighted = phaseHighlight === "both" || phaseHighlight === kind;
+  return highlighted || kind === "unmarked";
+}
+
+function ghostLook(element: DrawElement) {
+  return {
+    color: element.color,
+    emissive: "#000000",
+    emissiveIntensity: 0,
+    roughness: element.roughness,
+    metalness: element.metalness,
+    opacity: Math.min(element.opacity, GHOST_OPACITY),
+  };
+}
+
 function meshLook(
   element: DrawElement,
   selected: boolean,
+  linked: boolean,
   phaseHighlight: PhaseHighlight,
   structuralHighlight: boolean,
+  demolishedHighlight: boolean,
 ) {
   if (selected) {
     return {
@@ -122,21 +192,59 @@ function meshLook(
       opacity: 1,
     };
   }
-  const kind = phaseKind(element.phaseValue);
-  const highlighted =
-    phaseHighlight === "both" || (phaseHighlight !== "off" && phaseHighlight === kind);
-  const phaseOn = phaseHighlight !== "off" && (highlighted || kind === "unmarked");
-  if (structuralHighlight && isStructuralValue(element.structuralValue) && !phaseOn) {
+  if (linked) {
     return {
-      color: STRUCTURAL_COLOR,
-      emissive: "#000000",
-      emissiveIntensity: 0,
-      roughness: 0.48,
-      metalness: 0.04,
+      color: LINKED_COLOR,
+      emissive: LINKED_EMISSIVE,
+      emissiveIntensity: 0.18,
+      roughness: 0.5,
+      metalness: element.metalness,
       opacity: 1,
     };
   }
+  if (phaseHighlight === "none") return ghostLook(element);
+  if (element.recommendation) {
+    return {
+      color: RECOMMENDED_COLOR,
+      emissive: "#9a5b08",
+      emissiveIntensity: 0.28,
+      roughness: 0.42,
+      metalness: 0.08,
+      opacity: 1,
+    };
+  }
+  const kind = phaseKind(element.phaseValue);
+  const proposedFocus = phaseHighlight === "proposed";
+  const demolishedMatch = demolishedHighlight && isDemolishedValue(element.demolishedValue);
+  // Existing and Both keep their own colors. Proposed and Demolished fade everything that is not a match.
+  const fadeOthers = proposedFocus || (demolishedHighlight && phaseHighlight !== "existing" && phaseHighlight !== "both");
+  if (fadeOthers) {
+    if (proposedFocus && kind === "proposed") {
+      const look = PHASE_LOOKS.proposed;
+      return {
+        color: look.color,
+        emissive: "#000000",
+        emissiveIntensity: 0,
+        roughness: 0.72,
+        metalness: 0.02,
+        opacity: look.opacity,
+      };
+    }
+    if (demolishedMatch) {
+      return {
+        color: DEMOLISHED_COLOR,
+        emissive: "#000000",
+        emissiveIntensity: 0,
+        roughness: 0.5,
+        metalness: 0.04,
+        opacity: 1,
+      };
+    }
+    return ghostLook(element);
+  }
+  const phaseOn = phaseApplies(element, phaseHighlight);
   if (phaseOn) {
+    const highlighted = phaseHighlight === "both" || phaseHighlight === kind;
     const look = PHASE_LOOKS[highlighted ? kind : "unmarked"];
     return {
       color: look.color,
@@ -145,6 +253,26 @@ function meshLook(
       roughness: 0.72,
       metalness: 0.02,
       opacity: look.opacity,
+    };
+  }
+  if (demolishedMatch) {
+    return {
+      color: DEMOLISHED_COLOR,
+      emissive: "#000000",
+      emissiveIntensity: 0,
+      roughness: 0.5,
+      metalness: 0.04,
+      opacity: 1,
+    };
+  }
+  if (structuralHighlight && isStructuralElement(element)) {
+    return {
+      color: STRUCTURAL_COLOR,
+      emissive: "#000000",
+      emissiveIntensity: 0,
+      roughness: 0.48,
+      metalness: 0.04,
+      opacity: 1,
     };
   }
   return {
@@ -160,14 +288,18 @@ function meshLook(
 const ElementMesh = memo(function ElementMesh({
   element,
   selected,
+  linked,
   phaseHighlight,
   structuralHighlight,
+  demolishedHighlight,
   onSelect,
 }: {
   element: DrawElement;
   selected: boolean;
+  linked: boolean;
   phaseHighlight: PhaseHighlight;
   structuralHighlight: boolean;
+  demolishedHighlight: boolean;
   onSelect: (id: string) => void;
 }) {
   const geometry = useMemo(() => {
@@ -183,8 +315,11 @@ const ElementMesh = memo(function ElementMesh({
   }, [geometry]);
 
   const opening = element.elementType === "Window" || element.elementType === "Door";
-  const look = meshLook(element, selected, phaseHighlight, structuralHighlight);
-  const structural = structuralHighlight && isStructuralValue(element.structuralValue);
+  const recommended = Boolean(element.recommendation);
+  const look = meshLook(element, selected, linked, phaseHighlight, structuralHighlight, demolishedHighlight);
+  const fadeAll = phaseHighlight === "none";
+  const structural = !fadeAll && structuralHighlight && isStructuralElement(element);
+  const demolished = !fadeAll && demolishedHighlight && isDemolishedValue(element.demolishedValue);
 
   return (
     <mesh
@@ -212,11 +347,14 @@ const ElementMesh = memo(function ElementMesh({
         depthWrite={look.opacity > 0.9}
         side={THREE.DoubleSide}
         flatShading
-        polygonOffset={opening}
-        polygonOffsetFactor={opening ? -2 : 0}
-        polygonOffsetUnits={opening ? -2 : 0}
+        polygonOffset={opening || recommended}
+        polygonOffsetFactor={recommended ? -4 : opening ? -2 : 0}
+        polygonOffsetUnits={recommended ? -4 : opening ? -2 : 0}
       />
-      {structural && <Outlines color={STRUCTURAL_COLOR} thickness={4} screenspace={false} angle={Math.PI} />}
+      {recommended && !selected && !fadeAll && <Edges threshold={20} color={RECOMMENDED_OUTLINE} />}
+      {demolished && <Outlines color={DEMOLISHED_COLOR} thickness={8} screenspace={false} angle={Math.PI} />}
+      {structural && <Outlines color={STRUCTURAL_COLOR} thickness={3} screenspace={false} angle={Math.PI} />}
+      {linked && !selected && <Edges threshold={18} color={LINKED_OUTLINE} />}
       {selected && <Edges threshold={22} color="#3a2a12" />}
     </mesh>
   );

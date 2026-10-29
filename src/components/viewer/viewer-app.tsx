@@ -23,19 +23,48 @@ import {
 import {
   ELEMENT_STYLES,
   GEOMETRY_NOTE,
+  DEMOLISHED_COLOR,
+  DEMOLISHED_FIELD,
   PHASE_FIELD,
   PHASE_LOOKS,
   STRUCTURAL_COLOR,
   STRUCTURAL_FIELD,
+  STRUCTURAL_YES,
   clusterSplit,
   elementTypeOrder,
-  isStructuralValue,
+  isDemolishedValue,
+  isStructuralElement,
   parseModel,
   phaseKind,
   type DrawElement,
   type ParsedModel,
   type PhaseHighlight,
 } from "@/lib/geometry";
+import {
+  GRAPH_RELATIONS,
+  defaultRelationIds,
+  describeElement,
+  includeReasonText,
+  nodeLegendOrder,
+  parseGraphTables,
+  phaseRoleText,
+  placeGraph,
+  projectFor,
+  relationStyle,
+  type GraphCatalog,
+  type GraphMembership,
+  type GraphPlacement,
+} from "@/lib/graph";
+import {
+  RECOMMENDED_COLOR,
+  buildRecommendedColumns,
+  parseColumnRecommendations,
+  reasonText,
+  recommendationsFor,
+  slotName,
+  type ColumnRecommendation,
+  type RecommendationMode,
+} from "@/lib/recommendations";
 import { SAMPLES, sampleUrl, type SampleModel } from "@/lib/samples";
 import { formatArea, formatLength, formatVolume } from "@/lib/units";
 import { cn } from "@/lib/utils";
@@ -79,6 +108,58 @@ export function ViewerApp() {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [phaseHighlight, setPhaseHighlight] = useState<PhaseHighlight>("off");
   const [structuralOn, setStructuralOn] = useState(false);
+  const [demolishedOn, setDemolishedOn] = useState(false);
+  const [recommendationCatalog, setRecommendationCatalog] = useState<ColumnRecommendation[] | null>(null);
+  const [recommendationMode, setRecommendationMode] = useState<RecommendationMode>("show");
+  const [statusOpen, setStatusOpen] = useState(true);
+  const [graphCatalog, setGraphCatalog] = useState<GraphCatalog | null>(null);
+  const [graphFailed, setGraphFailed] = useState(false);
+  const [graphOn, setGraphOn] = useState(true);
+  const [graphRelations, setGraphRelations] = useState<Set<string>>(defaultRelationIds);
+
+  useEffect(() => {
+    let cancel = false;
+    const loadRecommendations = async () => {
+      try {
+        const response = await fetch("/recommendations/column_recommendations.csv");
+        if (!response.ok) throw new Error(String(response.status));
+        const text = await response.text();
+        if (!cancel) setRecommendationCatalog(parseColumnRecommendations(text));
+      } catch {
+        if (!cancel) setRecommendationCatalog([]);
+      }
+    };
+    void loadRecommendations();
+    return () => {
+      cancel = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancel = false;
+    const loadGraph = async () => {
+      try {
+        const [nodesResponse, edgesResponse] = await Promise.all([
+          fetch("/graphs/nodes.csv"),
+          fetch("/graphs/edges.csv"),
+        ]);
+        if (!nodesResponse.ok || !edgesResponse.ok) throw new Error("graph");
+        const [nodesText, edgesText] = await Promise.all([nodesResponse.text(), edgesResponse.text()]);
+        if (cancel) return;
+        setGraphCatalog(parseGraphTables(nodesText, edgesText));
+        setGraphFailed(false);
+      } catch {
+        if (!cancel) {
+          setGraphCatalog({ projects: new Map() });
+          setGraphFailed(true);
+        }
+      }
+    };
+    void loadGraph();
+    return () => {
+      cancel = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!source) return;
@@ -149,8 +230,6 @@ export function ViewerApp() {
 
   const fitElements = split.core.length > 0 ? split.core : visible;
   const restElements = split.core.length > 0 ? split.distant : [];
-  const selected = model?.elements.find((element) => element.id === selectedId) ?? null;
-  const selectedHidden = Boolean(selected && !visible.some((element) => element.id === selected.id));
 
   const counts = useMemo(() => {
     const map = new Map<string, number>();
@@ -180,14 +259,80 @@ export function ViewerApp() {
   }, [visible]);
 
   const structuralCount = useMemo(
-    () => visible.filter((element) => isStructuralValue(element.structuralValue)).length,
+    () => visible.filter((element) => isStructuralElement(element)).length,
     [visible],
   );
 
-  const span = useMemo(() => planSpan(fitElements), [fitElements]);
+  const demolishedCount = useMemo(
+    () => visible.filter((element) => isDemolishedValue(element.demolishedValue)).length,
+    [visible],
+  );
+
+  const projectRecommendations = useMemo(() => {
+    if (!model || !recommendationCatalog) return [];
+    return recommendationsFor(recommendationCatalog, model.documentName, model.filename);
+  }, [model, recommendationCatalog]);
+
+  const recommendationColumns = useMemo(() => {
+    if (!model) return [];
+    return buildRecommendedColumns(projectRecommendations, model.elements);
+  }, [model, projectRecommendations]);
+
+  const projectGraph = useMemo(() => {
+    if (!model || !graphCatalog) return null;
+    return projectFor(graphCatalog, model.documentName, model.filename);
+  }, [model, graphCatalog]);
+
+  const visibleIds = useMemo(() => new Set(visible.map((element) => element.id)), [visible]);
+
+  const graphPlacement = useMemo(() => {
+    if (!projectGraph || !model) return null;
+    return placeGraph(projectGraph, model.elements, visibleIds);
+  }, [projectGraph, model, visibleIds]);
+
+  const graphNodes = graphOn && graphPlacement && recommendationMode !== "only" ? graphPlacement.nodes : [];
+  const graphEdges = useMemo(() => {
+    if (!graphOn || !graphPlacement || recommendationMode === "only") return [];
+    return graphPlacement.edges.filter((edge) => graphRelations.has(edge.relation));
+  }, [graphOn, graphPlacement, graphRelations, recommendationMode]);
+
+  const graphSelection = useMemo(() => {
+    if (!projectGraph || !graphPlacement || !selectedId) return null;
+    return describeElement(projectGraph, graphPlacement, selectedId);
+  }, [projectGraph, graphPlacement, selectedId]);
+
+  useEffect(() => {
+    if (!projectGraph) return;
+    const known = new Set<string>(GRAPH_RELATIONS.map((relation) => relation.id));
+    const next = defaultRelationIds();
+    for (const edge of projectGraph.edges) {
+      if (!known.has(edge.relation)) next.add(edge.relation);
+    }
+    setGraphRelations(next);
+    setGraphOn(true);
+  }, [projectGraph]);
+
+  const selected =
+    model?.elements.find((element) => element.id === selectedId) ??
+    recommendationColumns.find((element) => element.id === selectedId) ??
+    null;
+  const selectedHidden = Boolean(
+    selected &&
+      (selected.recommendation
+        ? recommendationMode === "off"
+        : recommendationMode === "only" || !visible.some((element) => element.id === selected.id)),
+  );
+
+  useEffect(() => {
+    if (recommendationMode === "only" && recommendationCatalog && projectRecommendations.length === 0) {
+      setRecommendationMode("show");
+    }
+  }, [recommendationMode, recommendationCatalog, projectRecommendations.length]);
+
+  const span = useMemo(() => planSpan(recommendationMode === "only" ? recommendationColumns : fitElements), [fitElements, recommendationColumns, recommendationMode]);
   const grid = span > 180 ? { cell: 10, section: 50 } : span > 80 ? { cell: 5, section: 25 } : span > 30 ? { cell: 2, section: 10 } : { cell: 1, section: 5 };
 
-  const frameToken = `${model?.filename ?? "none"}|${frameMode}|${fitNonce}`;
+  const frameToken = `${model?.filename ?? "none"}|${frameMode}|${fitNonce}|${recommendationMode}|${recommendationMode === "only" ? recommendationColumns.length : 0}`;
 
   const resetForLoad = (label: string) => {
     setLoad({ status: "loading", label });
@@ -198,6 +343,10 @@ export function ViewerApp() {
     setFitNonce(0);
     setPhaseHighlight("off");
     setStructuralOn(false);
+    setDemolishedOn(false);
+    setRecommendationMode("show");
+    setGraphOn(true);
+    setGraphRelations(defaultRelationIds());
   };
 
   const filename = source?.kind === "upload" ? source.name : source?.kind === "sample" ? source.sample.file : null;
@@ -301,6 +450,15 @@ export function ViewerApp() {
       }}
       onTypeFilter={setTypeFilter}
       onQuery={setQuery}
+      recommendation={
+        <RecommendationControl
+          loaded={recommendationCatalog != null}
+          count={projectRecommendations.length}
+          mode={recommendationMode}
+          onChange={setRecommendationMode}
+          layout="panel"
+        />
+      }
     />
   );
 
@@ -378,39 +536,83 @@ export function ViewerApp() {
           {hasModel && (
             <>
               <SceneCanvas
-                fitElements={fitElements}
-                restElements={restElements}
+                fitElements={recommendationMode === "only" ? recommendationColumns : fitElements}
+                restElements={recommendationMode === "only" ? [] : restElements}
+                markerElements={recommendationMode === "show" ? recommendationColumns : []}
                 selectedId={selectedHidden ? null : selectedId}
                 onSelect={setSelectedId}
                 frameToken={frameToken}
                 gridCell={grid.cell}
                 gridSection={grid.section}
                 phaseHighlight={model?.phaseField ? phaseHighlight : "off"}
-                structuralHighlight={Boolean(model?.structuralField) && structuralOn}
+                structuralHighlight={structuralOn}
+                demolishedHighlight={Boolean(model?.demolishedField) && demolishedOn}
+                graphNodes={graphNodes}
+                graphEdges={graphEdges}
               />
-              <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-3">
-                <div className="pointer-events-none max-w-[70%] rounded-lg bg-white/90 px-3 py-2 text-xs text-neutral-800 shadow-sm ring-1 ring-black/10">
-                  <p className="font-medium break-all text-neutral-950">{filename}</p>
-                  <p className="mt-0.5 text-neutral-600">
-                    {visible.length} shown · grid {grid.cell} ft at Revit Z = 0 · drag to orbit, right-drag to pan, scroll to zoom
-                  </p>
-                  {frameMode === "cluster" && distantCount > 0 && (
-                    <p className="mt-1 text-neutral-600">
-                      {distantCount} element{distantCount === 1 ? "" : "s"} sit far from the main cluster and are outside this framing.
-                    </p>
-                  )}
-                  {model?.phaseField && phaseHighlight !== "off" && (
-                    <PhaseLegend elements={model.elements} mode={phaseHighlight} />
-                  )}
-                  {model?.structuralField && structuralOn && (
-                    <StructuralLegend phaseOn={phaseHighlight !== "off"} count={structuralCount} />
+              <div className="pointer-events-none absolute inset-x-0 top-0 bottom-0 flex items-start justify-between gap-2 p-3">
+                <div className="pointer-events-auto max-w-[70%] rounded-lg bg-white/90 px-3 py-2 text-xs text-neutral-800 shadow-sm ring-1 ring-black/10">
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="min-w-0 font-medium break-all text-neutral-950">{filename}</p>
+                    <button
+                      type="button"
+                      aria-expanded={statusOpen}
+                      onClick={() => setStatusOpen((open) => !open)}
+                      className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-neutral-700 hover:bg-neutral-200"
+                    >
+                      {statusOpen ? "Hide" : "Show"}
+                    </button>
+                  </div>
+                  {statusOpen && (
+                    <>
+                      <p className="mt-0.5 text-neutral-600">
+                        {recommendationMode === "only"
+                          ? `${recommendationColumns.length} recommended column${recommendationColumns.length === 1 ? "" : "s"}`
+                          : `${visible.length} shown${recommendationMode === "show" && recommendationColumns.length > 0 ? ` · ${recommendationColumns.length} recommended` : ""}`}
+                        {graphOn && graphPlacement ? ` · graph ${graphPlacement.onScreenCount} nodes, ${graphEdges.length} edges` : ""}
+                        {" "}
+                        · grid {grid.cell} ft at Revit Z = 0 · drag to orbit, right-drag to pan, scroll to zoom
+                      </p>
+                      {recommendationMode !== "only" && frameMode === "cluster" && distantCount > 0 && (
+                        <p className="mt-1 text-neutral-600">
+                          {distantCount} element{distantCount === 1 ? "" : "s"} sit far from the main cluster and are outside this framing.
+                        </p>
+                      )}
+                      {recommendationMode !== "only" && phaseHighlight === "none" && (
+                        <p className="mt-1 text-neutral-600">
+                          Every element is faded. A selected element stays gold, and the elements it connects to stay teal.
+                        </p>
+                      )}
+                      {recommendationMode !== "only" && model?.phaseField && phaseHighlight !== "off" && phaseHighlight !== "none" && (
+                        <PhaseLegend elements={model.elements} mode={phaseHighlight} />
+                      )}
+                      {recommendationMode !== "only" && model?.demolishedField && demolishedOn && (
+                        <DemolishedLegend
+                          elements={visible}
+                          count={demolishedCount}
+                          phaseHighlight={phaseHighlight}
+                          structuralOn={structuralOn}
+                        />
+                      )}
+                      {structuralOn && recommendationMode !== "only" && (
+                        <StructuralLegend
+                          elements={visible}
+                          count={structuralCount}
+                          phaseOn={phaseHighlight !== "off" && phaseHighlight !== "none"}
+                          demolishedOn={Boolean(model?.demolishedField) && demolishedOn}
+                        />
+                      )}
+                      {recommendationMode !== "off" && recommendationColumns.length > 0 && (
+                        <RecommendationLegend count={recommendationColumns.length} only={recommendationMode === "only"} />
+                      )}
+                    </>
                   )}
                 </div>
-                <div className="pointer-events-auto flex max-w-[17rem] flex-col items-end gap-1.5">
+                <div className="pointer-events-auto flex max-h-full max-w-[18rem] flex-col items-end gap-1.5 overflow-y-auto">
                   <Button size="sm" variant="secondary" onClick={() => setFitNonce((value) => value + 1)}>
                     Fit view
                   </Button>
-                  {distantCount > 0 && (
+                  {recommendationMode !== "only" && distantCount > 0 && (
                     <Button
                       size="sm"
                       variant="outline"
@@ -420,21 +622,55 @@ export function ViewerApp() {
                       {frameMode === "cluster" ? "Frame entire file" : "Frame main cluster"}
                     </Button>
                   )}
-                  <PhaseHighlightControl
-                    available={Boolean(model?.phaseField)}
-                    mode={phaseHighlight}
-                    counts={phaseCounts}
-                    onChange={setPhaseHighlight}
+                  {recommendationMode !== "only" && (
+                    <PhaseHighlightControl
+                      available={Boolean(model?.phaseField)}
+                      mode={phaseHighlight}
+                      counts={phaseCounts}
+                      onChange={setPhaseHighlight}
+                      demolishedAvailable={Boolean(model?.demolishedField)}
+                      demolishedOn={demolishedOn}
+                      demolishedCount={demolishedCount}
+                      onDemolished={setDemolishedOn}
+                    />
+                  )}
+                  {recommendationMode !== "only" && (
+                    <StructuralHighlightControl on={structuralOn} count={structuralCount} onChange={setStructuralOn} />
+                  )}
+                  <RecommendationControl
+                    loaded={recommendationCatalog != null}
+                    count={projectRecommendations.length}
+                    mode={recommendationMode}
+                    onChange={setRecommendationMode}
                   />
-                  <StructuralHighlightControl
-                    available={Boolean(model?.structuralField)}
-                    on={structuralOn}
-                    count={structuralCount}
-                    onChange={setStructuralOn}
-                  />
+                  {recommendationMode !== "only" && (
+                    <GraphControl
+                      loading={graphCatalog == null}
+                      failed={graphFailed}
+                      placement={graphPlacement}
+                      on={graphOn}
+                      relations={graphRelations}
+                      onToggle={setGraphOn}
+                      onToggleRelation={(relationId) => {
+                        setGraphRelations((current) => {
+                          const next = new Set(current);
+                          if (next.has(relationId)) next.delete(relationId);
+                          else next.add(relationId);
+                          return next;
+                        });
+                      }}
+                    />
+                  )}
                 </div>
               </div>
-              {visible.length === 0 && (
+              {recommendationMode === "only" && recommendationColumns.length === 0 && (
+                <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-6">
+                  <div className="max-w-sm rounded-xl bg-white/95 px-4 py-3 text-sm shadow-sm ring-1 ring-black/10">
+                    This project has no recommended columns.
+                  </div>
+                </div>
+              )}
+              {recommendationMode !== "only" && visible.length === 0 && (
                 <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-6">
                   <div className="max-w-sm rounded-xl bg-white/95 px-4 py-3 text-sm shadow-sm ring-1 ring-black/10">
                     Nothing matches this filter. Turn a category back on, or set type to All types.
@@ -447,7 +683,7 @@ export function ViewerApp() {
                   onClick={() => setDetailsOpen(true)}
                   className="absolute inset-x-3 bottom-3 rounded-xl bg-white/95 p-3 text-left shadow-md ring-1 ring-black/10 lg:hidden"
                 >
-                  <SelectionSummary element={selected} hidden={selectedHidden} compact />
+                  <SelectionSummary element={selected} hidden={selectedHidden} compact graph={graphSelection} />
                 </button>
               )}
             </>
@@ -457,7 +693,13 @@ export function ViewerApp() {
 
       {hasModel && (
         <aside className="hidden h-full w-[360px] shrink-0 flex-col border-l border-black/10 bg-background lg:flex">
-          <Inspector element={selected} hidden={selectedHidden} onClear={() => setSelectedId(null)} />
+          <Inspector
+            element={selected}
+            hidden={selectedHidden}
+            graph={projectGraph ? graphSelection : null}
+            onOpenElement={setSelectedId}
+            onClear={() => setSelectedId(null)}
+          />
         </aside>
       )}
       </div>
@@ -487,7 +729,13 @@ export function ViewerApp() {
             <SheetTitle>Element details</SheetTitle>
             <SheetDescription>Measurements and schedule fields for the selection.</SheetDescription>
           </SheetHeader>
-          <Inspector element={selected} hidden={selectedHidden} onClear={() => setSelectedId(null)} />
+          <Inspector
+            element={selected}
+            hidden={selectedHidden}
+            graph={projectGraph ? graphSelection : null}
+            onOpenElement={setSelectedId}
+            onClear={() => setSelectedId(null)}
+          />
         </SheetContent>
       </Sheet>
     </div>
@@ -511,6 +759,7 @@ function Controls({
   onAllTypes,
   onTypeFilter,
   onQuery,
+  recommendation,
 }: {
   source: Source | null;
   load: LoadState;
@@ -528,6 +777,7 @@ function Controls({
   onAllTypes: () => void;
   onTypeFilter: (value: string) => void;
   onQuery: (value: string) => void;
+  recommendation: React.ReactNode;
 }) {
   const types = elementTypeOrder([...counts.keys()]);
 
@@ -635,6 +885,8 @@ function Controls({
           />
         </div>
 
+        {recommendation}
+
         <Separator />
 
         <div>
@@ -678,10 +930,14 @@ function Controls({
 function Inspector({
   element,
   hidden,
+  graph,
+  onOpenElement,
   onClear,
 }: {
   element: DrawElement | null;
   hidden: boolean;
+  graph: GraphMembership | null;
+  onOpenElement: (id: string) => void;
   onClear: () => void;
 }) {
   if (!element) {
@@ -703,16 +959,28 @@ function Inspector({
             {element.elementType}
           </p>
           <h2 className="mt-1 text-base font-semibold leading-snug">{element.typeName}</h2>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Id {element.id}
-            {element.mark ? ` · Mark ${element.mark}` : ""}
-            {element.family ? ` · ${element.family}` : ""}
-          </p>
-          {element.levelName && <p className="mt-1 text-xs text-muted-foreground">{element.levelName}</p>}
+          {element.recommendation ? (
+            <RecommendationIdentity element={element} />
+          ) : (
+            <p className="mt-1 text-xs text-muted-foreground">
+              Id {element.id}
+              {element.mark ? ` · Mark ${element.mark}` : ""}
+              {element.family ? ` · ${element.family}` : ""}
+            </p>
+          )}
+          {element.levelName && !element.recommendation && (
+            <p className="mt-1 text-xs text-muted-foreground">{element.levelName}</p>
+          )}
           {element.phaseField && (
             <p className="mt-2 text-xs">
               <span className="text-muted-foreground">{element.phaseField}</span>
               <span className="ml-1.5 font-medium">{element.phaseValue || "(blank)"}</span>
+            </p>
+          )}
+          {element.demolishedField && (
+            <p className="mt-1 text-xs">
+              <span className="text-muted-foreground">{element.demolishedField}</span>
+              <span className="ml-1.5 font-medium">{element.demolishedValue || "(blank)"}</span>
             </p>
           )}
           {element.structuralField && (
@@ -720,6 +988,9 @@ function Inspector({
               <span className="text-muted-foreground">{element.structuralField}</span>
               <span className="ml-1.5 font-medium">{element.structuralValue || "(blank)"}</span>
             </p>
+          )}
+          {isStructuralElement(element) && element.structuralValue.trim() !== STRUCTURAL_YES && (
+            <p className="mt-1 text-xs text-muted-foreground">Counted as structural from element type {element.elementType}.</p>
           )}
           {hidden && (
             <p className="mt-2 text-xs text-amber-800">This element is hidden by the current filter.</p>
@@ -752,7 +1023,9 @@ function Inspector({
       </div>
       <Separator />
       <ScrollArea className="min-h-0 flex-1">
-        <div className="p-4">
+        <div className="flex flex-col gap-4 p-4">
+          {graph && <GraphMembershipPanel element={element} graph={graph} onOpenElement={onOpenElement} />}
+          <div>
           <h3 className="text-sm font-medium">Schedule row</h3>
           <dl className="mt-2 flex flex-col gap-1.5">
             {element.properties.map((property) => (
@@ -762,6 +1035,7 @@ function Inspector({
               </div>
             ))}
           </dl>
+          </div>
         </div>
       </ScrollArea>
     </div>
@@ -772,25 +1046,40 @@ function SelectionSummary({
   element,
   hidden,
   compact,
+  graph,
 }: {
   element: DrawElement;
   hidden: boolean;
   compact?: boolean;
+  graph?: GraphMembership | null;
 }) {
   const lengths = element.measurements.filter((measurement) => measurement.kind === "length").slice(0, compact ? 4 : 8);
   return (
     <div>
       <p className="text-[11px] font-medium tracking-wide text-muted-foreground uppercase">{element.elementType}</p>
       <p className="truncate text-sm font-semibold">{element.typeName}</p>
-      <p className="truncate text-xs text-muted-foreground">
-        Id {element.id}
-        {element.mark ? ` · ${element.mark}` : ""}
-        {hidden ? " · hidden by filter" : ""}
-      </p>
+      {element.recommendation ? (
+        <p className="truncate text-xs text-muted-foreground">
+          Wall {element.recommendation.wallId}
+          {hidden ? " · hidden by filter" : ""}
+        </p>
+      ) : (
+        <p className="truncate text-xs text-muted-foreground">
+          Id {element.id}
+          {element.mark ? ` · ${element.mark}` : ""}
+          {hidden ? " · hidden by filter" : ""}
+        </p>
+      )}
       {element.phaseField && (
         <p className="mt-1 text-xs">
           <span className="text-muted-foreground">{element.phaseField}</span>
           <span className="ml-1 font-medium">{element.phaseValue || "(blank)"}</span>
+        </p>
+      )}
+      {element.demolishedField && (
+        <p className="mt-1 text-xs">
+          <span className="text-muted-foreground">{element.demolishedField}</span>
+          <span className="ml-1 font-medium">{element.demolishedValue || "(blank)"}</span>
         </p>
       )}
       {element.structuralField && (
@@ -807,6 +1096,14 @@ function SelectionSummary({
           </div>
         ))}
       </dl>
+      {graph?.inGraph && (
+        <p className="mt-2 text-[11px] text-muted-foreground">
+          {graph.links.length} graph link{graph.links.length === 1 ? "" : "s"}. Open details to check them.
+        </p>
+      )}
+      {graph && !graph.inGraph && !element.recommendation && (
+        <p className="mt-2 text-[11px] text-muted-foreground">This element is not in the graph.</p>
+      )}
       <p className="mt-2 text-[11px] text-muted-foreground">Open details for the full row.</p>
     </div>
   );
@@ -904,16 +1201,352 @@ function Welcome({
   );
 }
 
+function RecommendationIdentity({ element }: { element: DrawElement }) {
+  const mark = element.recommendation;
+  if (!mark) return null;
+  return (
+    <div className="mt-1 flex flex-col gap-1 text-xs">
+      <p className="text-muted-foreground">
+        Demolished wall {mark.wallId}
+        {element.levelName ? ` · ${element.levelName}` : ""}
+      </p>
+      <p>
+        <span className="text-muted-foreground">Project</span>
+        <span className="ml-1.5 font-medium break-all">{mark.projectId}</span>
+      </p>
+      <p>
+        <span className="text-muted-foreground">Place</span>
+        <span className="ml-1.5 font-medium">
+          {slotName(mark.slot)} · {Math.round(mark.probability * 100)}%
+        </span>
+      </p>
+      <p className="leading-5 text-muted-foreground">{reasonText(mark.reason)}. The amber column is a 300 mm marker at that plan point.</p>
+    </div>
+  );
+}
+
+function RecommendationControl({
+  loaded,
+  count,
+  mode,
+  onChange,
+  layout = "overlay",
+}: {
+  loaded: boolean;
+  count: number;
+  mode: RecommendationMode;
+  onChange: (mode: RecommendationMode) => void;
+  layout?: "overlay" | "panel";
+}) {
+  const options: { id: RecommendationMode; label: string }[] = [
+    { id: "show", label: count > 0 ? `Show ${count}` : "Show" },
+    { id: "only", label: "Only" },
+    { id: "off", label: "Off" },
+  ];
+  const overlay = layout === "overlay";
+
+  return (
+    <div
+      className={cn(
+        overlay ? "rounded-lg bg-white/95 p-2 text-left shadow-sm ring-1 ring-black/10" : "flex flex-col gap-2",
+      )}
+    >
+      <p className={cn("font-medium", overlay ? "px-0.5 text-[11px] text-neutral-800" : "text-sm")}>
+        Recommended columns
+      </p>
+      {!loaded ? (
+        <p className={cn("mt-1 text-[11px] leading-4", overlay ? "max-w-56 text-neutral-600" : "text-muted-foreground")}>
+          Loading column recommendations…
+        </p>
+      ) : (
+        <>
+          <div className={cn("flex flex-wrap gap-1", overlay ? "mt-1.5 justify-end" : "")}>
+            {options.map((option) => {
+              const active = mode === option.id;
+              const disabled = option.id !== "off" && count === 0;
+              return (
+                <button
+                  key={option.id}
+                  type="button"
+                  aria-pressed={active}
+                  disabled={disabled}
+                  onClick={() => onChange(option.id)}
+                  className={cn(
+                    "rounded-md px-2 py-1 text-[11px] font-medium disabled:cursor-not-allowed disabled:opacity-40",
+                    active
+                      ? "bg-neutral-900 text-white"
+                      : overlay
+                        ? "bg-neutral-100 text-neutral-800 hover:bg-neutral-200"
+                        : "bg-muted text-foreground hover:bg-muted/70",
+                  )}
+                >
+                  {option.label}
+                </button>
+              );
+            })}
+          </div>
+          <p className={cn("text-[11px] leading-4", overlay ? "mt-1 max-w-56 text-neutral-600" : "text-muted-foreground")}>
+            {count > 0
+              ? "Show keeps the model and draws each recommended column on its demolished wall. Only hides everything else."
+              : "This file has no column recommendations. Open a project that was scored, such as GMZ-2026-0412."}
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
+function RecommendationLegend({ count, only }: { count: number; only: boolean }) {
+  return (
+    <div className="mt-2 border-t border-neutral-200 pt-2">
+      <p className="flex items-center gap-1.5">
+        <span className="size-2.5 shrink-0 rounded-sm ring-1 ring-black/15" style={{ background: RECOMMENDED_COLOR }} />
+        <span>
+          Recommended {count}
+          {only ? " · model hidden" : ""}
+        </span>
+      </p>
+      <p className="mt-1 text-[11px] leading-4 text-neutral-500">
+        Amber columns sit at the learned plan point. Height follows the demolished wall. The 300 mm square is a marker, not a designed section.
+      </p>
+    </div>
+  );
+}
+
+function GraphControl({
+  loading,
+  failed,
+  placement,
+  on,
+  relations,
+  onToggle,
+  onToggleRelation,
+}: {
+  loading: boolean;
+  failed: boolean;
+  placement: GraphPlacement | null;
+  on: boolean;
+  relations: Set<string>;
+  onToggle: (on: boolean) => void;
+  onToggleRelation: (relationId: string) => void;
+}) {
+  const rows = graphRelationRows(placement, relations);
+  const legend = [...(placement?.nodes ?? [])].reduce<{ label: string; color: string; count: number }[]>((list, node) => {
+    const found = list.find((item) => item.label === node.typeLabel);
+    if (found) found.count += 1;
+    else list.push({ label: node.typeLabel, color: node.color, count: 1 });
+    return list;
+  }, []);
+  legend.sort((a, b) => nodeLegendOrder(a) - nodeLegendOrder(b) || a.label.localeCompare(b.label));
+
+  return (
+    <div className="w-64 rounded-lg bg-white/95 p-2 text-left shadow-sm ring-1 ring-black/10">
+      <p className="px-0.5 text-[11px] font-medium text-neutral-800">Graph</p>
+      {loading ? (
+        <p className="mt-1 text-[11px] leading-4 text-neutral-600">Loading the saved graph…</p>
+      ) : failed ? (
+        <p className="mt-1 text-[11px] leading-4 text-neutral-600">The graph tables could not be loaded.</p>
+      ) : !placement ? (
+        <p className="mt-1 text-[11px] leading-4 text-neutral-600">
+          This file has no saved graph. Open a project that was built into the node and edge tables, such as GMZ-2026-0412.
+        </p>
+      ) : (
+        <>
+          <div className="mt-1.5 flex flex-wrap justify-end gap-1">
+            <button
+              type="button"
+              aria-pressed={on}
+              onClick={() => onToggle(true)}
+              className={cn(
+                "rounded-md px-2 py-1 text-[11px] font-medium",
+                on ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-800 hover:bg-neutral-200",
+              )}
+            >
+              On {placement.onScreenCount}
+            </button>
+            <button
+              type="button"
+              aria-pressed={!on}
+              onClick={() => onToggle(false)}
+              className={cn(
+                "rounded-md px-2 py-1 text-[11px] font-medium",
+                !on ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-800 hover:bg-neutral-200",
+              )}
+            >
+              Off
+            </button>
+          </div>
+          <p className="mt-1 text-[11px] leading-4 text-neutral-600">
+            {placement.onScreenCount} of {placement.nodeCount} nodes sit on elements in this view.
+            {placement.hiddenCount > 0 ? ` ${placement.hiddenCount} hidden by the filter.` : ""}
+            {placement.missingCount > 0 ? ` ${placement.missingCount} are not drawn in this file.` : ""}
+          </p>
+          {on && (
+            <>
+              <div className="mt-1.5 flex flex-wrap justify-end gap-1">
+                {rows.map((row) => (
+                  <button
+                    key={row.id}
+                    type="button"
+                    aria-pressed={row.on}
+                    onClick={() => onToggleRelation(row.id)}
+                    className={cn(
+                      "inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium",
+                      row.on ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-800 hover:bg-neutral-200",
+                    )}
+                  >
+                    <span className="size-2 rounded-full" style={{ background: row.color }} />
+                    {row.label} {row.count.toLocaleString()}
+                  </button>
+                ))}
+              </div>
+              {legend.length > 0 && (
+                <ul className="mt-2 flex flex-col gap-1 border-t border-neutral-200 pt-2">
+                  {legend.map((item) => (
+                    <li key={item.label} className="flex items-center gap-1.5 text-[11px] text-neutral-700">
+                      <span className="size-2.5 shrink-0 rounded-full ring-1 ring-black/15" style={{ background: item.color }} />
+                      {item.label} {item.count}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <p className="mt-1.5 text-[11px] leading-4 text-neutral-500">
+                Each dot is the centre of an element in the graph. Each line is one saved relationship. Click an element to isolate its links: it turns gold, and the elements it connects to turn a softer teal. Proximity stays off until you turn it on.
+              </p>
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function graphRelationRows(placement: GraphPlacement | null, enabled: Set<string>) {
+  if (!placement) return [];
+  const seen = new Set<string>();
+  const rows: { id: string; label: string; color: string; count: number; on: boolean }[] = [];
+  for (const relation of GRAPH_RELATIONS) {
+    const count = placement.relationCounts.get(relation.id) ?? 0;
+    if (count === 0) continue;
+    seen.add(relation.id);
+    rows.push({
+      id: relation.id,
+      label: relation.label,
+      color: relation.color,
+      count,
+      on: enabled.has(relation.id),
+    });
+  }
+  for (const [id, count] of [...placement.relationCounts.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    if (seen.has(id) || count === 0) continue;
+    const style = relationStyle(id);
+    rows.push({ id, label: style.label, color: style.color, count, on: enabled.has(id) });
+  }
+  return rows;
+}
+
+function GraphMembershipPanel({
+  element,
+  graph,
+  onOpenElement,
+}: {
+  element: DrawElement;
+  graph: GraphMembership;
+  onOpenElement: (id: string) => void;
+}) {
+  if (element.recommendation) {
+    return (
+      <div>
+        <h3 className="text-sm font-medium">Graph</h3>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">Recommended columns are not part of the graph.</p>
+      </div>
+    );
+  }
+  if (!graph.inGraph) {
+    return (
+      <div>
+        <h3 className="text-sm font-medium">Graph</h3>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">This element is not in the graph.</p>
+      </div>
+    );
+  }
+
+  const groups: { relation: string; label: string; color: string; links: GraphMembership["links"] }[] = [];
+  for (const link of graph.links) {
+    const group = groups.find((item) => item.relation === link.relation);
+    if (group) group.links.push(link);
+    else groups.push({ relation: link.relation, label: link.label, color: link.color, links: [link] });
+  }
+
+  return (
+    <div>
+      <h3 className="text-sm font-medium">Graph</h3>
+      <p className="mt-1 text-xs leading-5 text-muted-foreground">
+        {phaseRoleText(graph.phaseRole)}. {includeReasonText(graph.includeReason)}.
+      </p>
+      {graph.links.length === 0 ? (
+        <p className="mt-2 text-xs leading-5 text-muted-foreground">No saved relationships for this element.</p>
+      ) : (
+        <div className="mt-2 flex flex-col gap-3">
+          {groups.map((group) => (
+            <div key={group.relation}>
+              <p className="flex items-center gap-1.5 text-xs font-medium">
+                <span className="size-2.5 rounded-full ring-1 ring-black/10" style={{ background: group.color }} />
+                {group.label}
+                <span className="font-normal text-muted-foreground">{group.links.length}</span>
+              </p>
+              <ul className="mt-1 flex flex-col">
+                {group.links.map((link) => (
+                  <li key={`${link.relation}-${link.otherId}`}>
+                    <button
+                      type="button"
+                      disabled={!link.otherDrawnId}
+                      onClick={() => {
+                        if (link.otherDrawnId) onOpenElement(link.otherDrawnId);
+                      }}
+                      className="w-full rounded-md px-1 py-1 text-left hover:bg-muted disabled:cursor-default disabled:hover:bg-transparent"
+                    >
+                      <span className="text-xs font-medium">
+                        {link.otherType || "Element"} {link.otherDrawnId ?? link.otherId}
+                      </span>
+                      <span className="mt-0.5 block text-[11px] leading-4 text-muted-foreground">
+                        {link.distanceM.toFixed(2)} m · confidence {link.confidence.toFixed(2)} · {link.source || "inferred"}
+                        {link.verticalGapM != null ? ` · gap ${link.verticalGapM.toFixed(2)} m` : ""}
+                        {!link.otherDrawnId ? " · not in this file" : link.onScreen ? "" : " · hidden by filter"}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      )}
+      <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
+        Every saved link is listed. The graph toggles choose which lines are drawn. A line joins the centres of the two elements.
+      </p>
+    </div>
+  );
+}
+
 function PhaseHighlightControl({
   available,
   mode,
   counts,
   onChange,
+  demolishedAvailable,
+  demolishedOn,
+  demolishedCount,
+  onDemolished,
 }: {
   available: boolean;
   mode: PhaseHighlight;
   counts: { existing: number; proposed: number; unmarked: number };
   onChange: (mode: PhaseHighlight) => void;
+  demolishedAvailable: boolean;
+  demolishedOn: boolean;
+  demolishedCount: number;
+  onDemolished: (on: boolean) => void;
 }) {
   const options: { id: PhaseHighlight; label: string }[] = [
     { id: "off", label: "Category" },
@@ -921,12 +1554,28 @@ function PhaseHighlightControl({
     { id: "proposed", label: "Proposed" },
     { id: "both", label: "Both" },
   ];
+  const none = mode === "none";
 
   return (
     <div className="rounded-lg bg-white/95 p-2 text-left shadow-sm ring-1 ring-black/10">
       <p className="px-0.5 text-[11px] font-medium text-neutral-800">{PHASE_FIELD}</p>
       {available ? (
         <div className="mt-1.5 flex flex-wrap justify-end gap-1">
+          <button
+            type="button"
+            aria-pressed={none}
+            title="Fade every element, the same way elements outside a phase filter are faded."
+            onClick={() => {
+              onChange("none");
+              onDemolished(false);
+            }}
+            className={cn(
+              "rounded-md px-2 py-1 text-[11px] font-medium",
+              none ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-800 hover:bg-neutral-200",
+            )}
+          >
+            None
+          </button>
           {options.map((option) => {
             const active = mode === option.id;
             const count =
@@ -936,7 +1585,7 @@ function PhaseHighlightControl({
                 key={option.id}
                 type="button"
                 aria-pressed={active}
-                onClick={() => onChange(option.id)}
+                onClick={() => onChange(active && option.id !== "off" ? "off" : option.id)}
                 className={cn(
                   "rounded-md px-2 py-1 text-[11px] font-medium",
                   active ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-800 hover:bg-neutral-200",
@@ -947,6 +1596,22 @@ function PhaseHighlightControl({
               </button>
             );
           })}
+          {demolishedAvailable && (
+            <button
+              type="button"
+              aria-pressed={demolishedOn}
+              onClick={() => {
+                if (!demolishedOn && mode === "none") onChange("off");
+                onDemolished(!demolishedOn);
+              }}
+              className={cn(
+                "rounded-md px-2 py-1 text-[11px] font-medium",
+                demolishedOn ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-800 hover:bg-neutral-200",
+              )}
+            >
+              Demolished {demolishedCount}
+            </button>
+          )}
         </div>
       ) : (
         <p className="mt-1 max-w-56 text-[11px] leading-4 text-neutral-600">
@@ -958,12 +1623,10 @@ function PhaseHighlightControl({
 }
 
 function StructuralHighlightControl({
-  available,
   on,
   count,
   onChange,
 }: {
-  available: boolean;
   on: boolean;
   count: number;
   onChange: (on: boolean) => void;
@@ -971,54 +1634,114 @@ function StructuralHighlightControl({
   return (
     <div className="rounded-lg bg-white/95 p-2 text-left shadow-sm ring-1 ring-black/10">
       <p className="px-0.5 text-[11px] font-medium text-neutral-800">{STRUCTURAL_FIELD}</p>
-      {available ? (
-        <div className="mt-1.5 flex flex-wrap justify-end gap-1">
-          <button
-            type="button"
-            aria-pressed={!on}
-            onClick={() => onChange(false)}
-            className={cn(
-              "rounded-md px-2 py-1 text-[11px] font-medium",
-              !on ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-800 hover:bg-neutral-200",
-            )}
-          >
-            Off
-          </button>
-          <button
-            type="button"
-            aria-pressed={on}
-            onClick={() => onChange(true)}
-            className={cn(
-              "rounded-md px-2 py-1 text-[11px] font-medium",
-              on ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-800 hover:bg-neutral-200",
-            )}
-          >
-            Structural {count}
-          </button>
-        </div>
-      ) : (
-        <p className="mt-1 max-w-56 text-[11px] leading-4 text-neutral-600">
-          This file has no {STRUCTURAL_FIELD} column, so structural elements cannot be highlighted.
-        </p>
-      )}
+      <div className="mt-1.5 flex flex-wrap justify-end gap-1">
+        <button
+          type="button"
+          aria-pressed={!on}
+          onClick={() => onChange(false)}
+          className={cn(
+            "rounded-md px-2 py-1 text-[11px] font-medium",
+            !on ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-800 hover:bg-neutral-200",
+          )}
+        >
+          Off
+        </button>
+        <button
+          type="button"
+          aria-pressed={on}
+          onClick={() => onChange(true)}
+          className={cn(
+            "rounded-md px-2 py-1 text-[11px] font-medium",
+            on ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-800 hover:bg-neutral-200",
+          )}
+        >
+          Structural {count}
+        </button>
+      </div>
     </div>
   );
 }
 
-function StructuralLegend({ phaseOn, count }: { phaseOn: boolean; count: number }) {
+function structuralRuleText(elements: DrawElement[]): string {
+  const types = new Set<string>();
+  let yes = false;
+  for (const element of elements) {
+    if (!isStructuralElement(element)) continue;
+    if (element.structuralValue.trim() === STRUCTURAL_YES) yes = true;
+    if (element.elementType.toLowerCase().includes("structural")) types.add(element.elementType);
+  }
+  const typeList = [...types].sort((a, b) => a.localeCompare(b));
+  const signals = [
+    yes ? `${STRUCTURAL_FIELD} = 1` : null,
+    typeList.length > 0 ? `type ${typeList.join(", ")}` : null,
+  ].filter(Boolean);
+  return signals.length > 0 ? signals.join(", or ") : "no structural rows in view";
+}
+
+function StructuralLegend({
+  elements,
+  count,
+  phaseOn,
+  demolishedOn,
+}: {
+  elements: DrawElement[];
+  count: number;
+  phaseOn: boolean;
+  demolishedOn: boolean;
+}) {
+  const rule = structuralRuleText(elements);
+  const combined = phaseOn || demolishedOn;
   return (
     <div className="mt-2 border-t border-neutral-200 pt-2">
       <p className="flex items-center gap-1.5">
         <span className="size-2.5 shrink-0 rounded-sm ring-1 ring-black/15" style={{ background: STRUCTURAL_COLOR }} />
-        <span>
-          Structural {count} · {STRUCTURAL_FIELD} = 1
-        </span>
+        <span>Structural {count}</span>
       </p>
       <p className="mt-1 text-[11px] leading-4 text-neutral-500">
-        {phaseOn
-          ? "Fill still follows Phase Created. A red outline marks Structural = 1. Element categories are not used."
-          : "Uses the Structural column, not element category. 0 and blank keep their current color."}
+        {combined
+          ? `Red outline. ${rule}. Fill stays with the other highlight.`
+          : `Red fill and outline. ${rule}. Other elements keep their current color.`}
       </p>
+    </div>
+  );
+}
+
+function DemolishedLegend({
+  elements,
+  count,
+  phaseHighlight,
+  structuralOn,
+}: {
+  elements: DrawElement[];
+  count: number;
+  phaseHighlight: PhaseHighlight;
+  structuralOn: boolean;
+}) {
+  const values = useMemo(() => {
+    const names = new Set<string>();
+    for (const element of elements) {
+      if (isDemolishedValue(element.demolishedValue)) names.add(element.demolishedValue);
+    }
+    return [...names].sort((a, b) => a.localeCompare(b));
+  }, [elements]);
+  const fadeOthers = phaseHighlight === "off" || phaseHighlight === "proposed";
+  const note = fadeOthers
+    ? phaseHighlight === "proposed"
+      ? "Teal fill, unless the row is also Proposed — those keep the purple fill and a teal outline. Other elements are faded."
+      : structuralOn
+        ? "Teal fill and outline. Other elements are faded. A red outline is structural."
+        : "Teal fill and outline. Other elements are faded."
+    : "Teal outline. None and blank stay in their current color. A red outline, when on, is structural.";
+  return (
+    <div className="mt-2 border-t border-neutral-200 pt-2">
+      <p className="flex items-center gap-1.5">
+        <span className="size-2.5 shrink-0 rounded-sm ring-1 ring-black/15" style={{ background: DEMOLISHED_COLOR }} />
+        <span>
+          Demolished {count}
+          {values.length > 0 ? ` · ${DEMOLISHED_FIELD} ${values.join(", ")}` : ""}
+        </span>
+      </p>
+      <p className="mt-1 text-[11px] leading-4 text-neutral-500">{note}</p>
     </div>
   );
 }
@@ -1034,10 +1757,10 @@ function PhaseLegend({ elements, mode }: { elements: DrawElement[]; mode: PhaseH
 
   const rows: { kind: "existing" | "proposed" | "unmarked"; note?: string }[] =
     mode === "both"
-      ? [{ kind: "existing" }, { kind: "proposed" }, { kind: "unmarked" }]
+      ? [{ kind: "existing" }, { kind: "proposed", note: "Includes New Construction." }, { kind: "unmarked" }]
       : mode === "existing"
-        ? [{ kind: "existing" }, { kind: "unmarked", note: "Proposed stays in its category color." }]
-        : [{ kind: "proposed" }, { kind: "unmarked", note: "Existing stays in its category color." }];
+        ? [{ kind: "existing" }, { kind: "unmarked", note: "Proposed and New Construction stay in their category color." }]
+        : [{ kind: "proposed", note: "Includes New Construction. Other elements are faded." }];
 
   return (
     <div className="mt-2 border-t border-neutral-200 pt-2">
@@ -1058,7 +1781,9 @@ function PhaseLegend({ elements, mode }: { elements: DrawElement[]; mode: PhaseH
           </li>
         ))}
       </ul>
-      {rows[1]?.note && <p className="mt-1 text-[11px] text-neutral-500">{rows.find((row) => row.note)?.note}</p>}
+      {rows.some((row) => row.note) && (
+        <p className="mt-1 text-[11px] text-neutral-500">{rows.find((row) => row.note)?.note}</p>
+      )}
     </div>
   );
 }

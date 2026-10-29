@@ -13,10 +13,11 @@ npm run dev -- --hostname 0.0.0.0 --port 4317
 
 Open [http://127.0.0.1:4317](http://127.0.0.1:4317).
 
-Orbit with the left mouse button, pan with the right button, and zoom with the scroll wheel. On a trackpad or phone, one finger orbits and two fingers pan and zoom. Once a model is drawn, the Phase Created control on the view can color Existing and Proposed separately. A blank cell, or any other phase name, stays unmarked. The Structural control next to it highlights rows whose Structural cell is 1, and can be used together with the phase colors.
+Orbit with the left mouse button, pan with the right button, and zoom with the scroll wheel. On a trackpad or phone, one finger orbits and two fingers pan and zoom. Once a model is drawn, the Phase Created control on the view can color Existing and Proposed separately, and can also mark Phase Demolished when that cell names a phase (None and blank are not demolished). The Structural control highlights a row when Structural is 1 or the element type is structural, and it can be used with the phase colors.
 
 The sample files keep their original names under `public/samples/`:
 
 - `1790789654315-GMZ-2026-0412-RS-BIM-001-01-1790788248538_1__36da.csv`
 - `1790703008892-GMZ-2026-0343-RS-BIM-001-01-1790700225758_1__2df6.csv`
 - `1790861177659-ModelTime1.5-1790860945337_413a.csv`
+- `1788445045269-GMZ-2025-0582-RS-BIM-001-03_778f.csv`
