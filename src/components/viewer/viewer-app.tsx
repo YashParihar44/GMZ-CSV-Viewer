@@ -116,6 +116,8 @@ export function ViewerApp() {
   const [graphFailed, setGraphFailed] = useState(false);
   const [graphOn, setGraphOn] = useState(true);
   const [graphRelations, setGraphRelations] = useState<Set<string>>(defaultRelationIds);
+  const [explodeOn, setExplodeOn] = useState(false);
+  const [explodeAmount, setExplodeAmount] = useState(40);
 
   useEffect(() => {
     let cancel = false;
@@ -347,6 +349,8 @@ export function ViewerApp() {
     setRecommendationMode("show");
     setGraphOn(true);
     setGraphRelations(defaultRelationIds());
+    setExplodeOn(false);
+    setExplodeAmount(40);
   };
 
   const filename = source?.kind === "upload" ? source.name : source?.kind === "sample" ? source.sample.file : null;
@@ -549,6 +553,7 @@ export function ViewerApp() {
                 demolishedHighlight={Boolean(model?.demolishedField) && demolishedOn}
                 graphNodes={graphNodes}
                 graphEdges={graphEdges}
+                explode={explodeOn ? explodeAmount / 100 : 0}
               />
               <div className="pointer-events-none absolute inset-x-0 top-0 bottom-0 flex items-start justify-between gap-2 p-3">
                 <div className="pointer-events-auto max-w-[70%] rounded-lg bg-white/90 px-3 py-2 text-xs text-neutral-800 shadow-sm ring-1 ring-black/10">
@@ -567,12 +572,17 @@ export function ViewerApp() {
                     <>
                       <p className="mt-0.5 text-neutral-600">
                         {recommendationMode === "only"
-                          ? `${recommendationColumns.length} recommended column${recommendationColumns.length === 1 ? "" : "s"}`
-                          : `${visible.length} shown${recommendationMode === "show" && recommendationColumns.length > 0 ? ` · ${recommendationColumns.length} recommended` : ""}`}
+                          ? `${recommendationColumns.length} predicted column${recommendationColumns.length === 1 ? "" : "s"}`
+                          : `${visible.length} shown${recommendationMode === "show" && recommendationColumns.length > 0 ? ` · ${recommendationColumns.length} predicted` : ""}`}
                         {graphOn && graphPlacement ? ` · graph ${graphPlacement.onScreenCount} nodes, ${graphEdges.length} edges` : ""}
                         {" "}
                         · grid {grid.cell} ft at Revit Z = 0 · drag to orbit, right-drag to pan, scroll to zoom
                       </p>
+                      {explodeOn && (
+                        <p className="mt-1 text-neutral-600">
+                          Explode view shifts each element outward from the model centre. Drag the slider to change the spread.
+                        </p>
+                      )}
                       {recommendationMode !== "only" && frameMode === "cluster" && distantCount > 0 && (
                         <p className="mt-1 text-neutral-600">
                           {distantCount} element{distantCount === 1 ? "" : "s"} sit far from the main cluster and are outside this framing.
@@ -612,6 +622,12 @@ export function ViewerApp() {
                   <Button size="sm" variant="secondary" onClick={() => setFitNonce((value) => value + 1)}>
                     Fit view
                   </Button>
+                  <ExplodeControl
+                    on={explodeOn}
+                    amount={explodeAmount}
+                    onToggle={() => setExplodeOn((value) => !value)}
+                    onAmount={setExplodeAmount}
+                  />
                   {recommendationMode !== "only" && distantCount > 0 && (
                     <Button
                       size="sm"
@@ -1218,9 +1234,10 @@ function RecommendationIdentity({ element }: { element: DrawElement }) {
         <span className="text-muted-foreground">Place</span>
         <span className="ml-1.5 font-medium">
           {slotName(mark.slot)} · {Math.round(mark.probability * 100)}%
+          {mark.errorM != null ? ` · ${mark.errorM.toFixed(2)} m from the actual column` : ""}
         </span>
       </p>
-      <p className="leading-5 text-muted-foreground">{reasonText(mark.reason)}. The amber column is a 300 mm marker at that plan point.</p>
+      <p className="leading-5 text-muted-foreground">{reasonText(mark.reason)}. The amber column is a 300 mm marker at the predicted plan point.</p>
     </div>
   );
 }
@@ -1252,11 +1269,11 @@ function RecommendationControl({
       )}
     >
       <p className={cn("font-medium", overlay ? "px-0.5 text-[11px] text-neutral-800" : "text-sm")}>
-        Recommended columns
+        Predicted columns
       </p>
       {!loaded ? (
         <p className={cn("mt-1 text-[11px] leading-4", overlay ? "max-w-56 text-neutral-600" : "text-muted-foreground")}>
-          Loading column recommendations…
+          Loading predicted columns…
         </p>
       ) : (
         <>
@@ -1287,8 +1304,8 @@ function RecommendationControl({
           </div>
           <p className={cn("text-[11px] leading-4", overlay ? "mt-1 max-w-56 text-neutral-600" : "text-muted-foreground")}>
             {count > 0
-              ? "Show keeps the model and draws each recommended column on its demolished wall. Only hides everything else."
-              : "This file has no column recommendations. Open a project that was scored, such as GMZ-2026-0412."}
+              ? "Show keeps the model and draws each predicted column on its demolished wall. Only hides everything else."
+              : "This file has no predicted columns. Open a held-out project, GMZ-2026-0360 or GMZ-2026-0307."}
           </p>
         </>
       )}
@@ -1302,12 +1319,12 @@ function RecommendationLegend({ count, only }: { count: number; only: boolean })
       <p className="flex items-center gap-1.5">
         <span className="size-2.5 shrink-0 rounded-sm ring-1 ring-black/15" style={{ background: RECOMMENDED_COLOR }} />
         <span>
-          Recommended {count}
+          Predicted {count}
           {only ? " · model hidden" : ""}
         </span>
       </p>
       <p className="mt-1 text-[11px] leading-4 text-neutral-500">
-        Amber columns sit at the learned plan point. Height follows the demolished wall. The 300 mm square is a marker, not a designed section.
+        Amber columns sit at the network&apos;s predicted plan point. Compare them with the columns already in the model. The 300 mm square is a marker, not a designed section.
       </p>
     </div>
   );
@@ -1458,7 +1475,7 @@ function GraphMembershipPanel({
     return (
       <div>
         <h3 className="text-sm font-medium">Graph</h3>
-        <p className="mt-1 text-xs leading-5 text-muted-foreground">Recommended columns are not part of the graph.</p>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">Predicted columns are markers, not nodes in the graph.</p>
       </div>
     );
   }
@@ -1525,6 +1542,51 @@ function GraphMembershipPanel({
       <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
         Every saved link is listed. The graph toggles choose which lines are drawn. A line joins the centres of the two elements.
       </p>
+    </div>
+  );
+}
+
+function ExplodeControl({
+  on,
+  amount,
+  onToggle,
+  onAmount,
+}: {
+  on: boolean;
+  amount: number;
+  onToggle: () => void;
+  onAmount: (amount: number) => void;
+}) {
+  return (
+    <div className="w-56 rounded-lg bg-white/95 p-2 text-left shadow-sm ring-1 ring-black/10">
+      <button
+        type="button"
+        aria-pressed={on}
+        onClick={onToggle}
+        className={cn(
+          "w-full rounded-md px-2 py-1 text-[11px] font-medium",
+          on ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-800 hover:bg-neutral-200",
+        )}
+      >
+        Explode view
+      </button>
+      <label className={cn("mt-2 block", on ? "" : "opacity-45")}>
+        <span className="flex items-center justify-between text-[11px] font-medium text-neutral-800">
+          <span>Spread</span>
+          <span className="tabular-nums">{on ? amount : 0}</span>
+        </span>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          step={1}
+          value={on ? amount : 0}
+          disabled={!on}
+          aria-label="Explode amount"
+          onChange={(event) => onAmount(Number(event.target.value))}
+          className="mt-1 h-1.5 w-full cursor-pointer accent-neutral-900 disabled:cursor-not-allowed"
+        />
+      </label>
     </div>
   );
 }

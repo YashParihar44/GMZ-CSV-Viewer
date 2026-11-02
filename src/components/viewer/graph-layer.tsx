@@ -4,6 +4,7 @@ import { Line } from "@react-three/drei";
 import { useThree } from "@react-three/fiber";
 import { useEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
+import { explodeOffset, type Vec3 } from "@/lib/geometry";
 import { GRAPH_RELATIONS, relationStyle, type PlacedEdge, type PlacedNode } from "@/lib/graph";
 
 type GraphLayerProps = {
@@ -11,6 +12,8 @@ type GraphLayerProps = {
   edges: PlacedEdge[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  explodeOrigin: Vec3;
+  explodeAmount: number;
 };
 
 type EdgeBatch = {
@@ -19,28 +22,44 @@ type EdgeBatch = {
   positions: Float32Array;
 };
 
-export function GraphLayer({ nodes, edges, selectedId, onSelect }: GraphLayerProps) {
+export function GraphLayer({
+  nodes,
+  edges,
+  selectedId,
+  onSelect,
+  explodeOrigin,
+  explodeAmount,
+}: GraphLayerProps) {
   const texture = useMemo(() => circleTexture(), []);
   useEffect(() => () => texture.dispose(), [texture]);
 
-  const dots = useMemo(() => packDots(nodes), [nodes]);
-  const batches = useMemo(() => packEdges(edges), [edges]);
+  const dots = useMemo(
+    () => packDots(nodes, explodeOrigin, explodeAmount),
+    [nodes, explodeOrigin, explodeAmount],
+  );
+  const batches = useMemo(
+    () => packEdges(edges, explodeOrigin, explodeAmount),
+    [edges, explodeOrigin, explodeAmount],
+  );
   const focus = useMemo(() => {
     if (!selectedId) return [] as EdgeBatch[];
     const mine = edges.filter((edge) => edge.srcDrawnId === selectedId || edge.dstDrawnId === selectedId);
-    return packEdges(mine);
-  }, [edges, selectedId]);
+    return packEdges(mine, explodeOrigin, explodeAmount);
+  }, [edges, selectedId, explodeOrigin, explodeAmount]);
   const selectedDot = useMemo(() => {
     const node = nodes.find((item) => item.drawnId === selectedId);
     if (!node) return null;
     const [red, green, blue] = hexToRgb(node.color);
     return {
-      position: new Float32Array(node.position),
+      position: new Float32Array(moved(node.position, explodeOrigin, explodeAmount)),
       color: new Float32Array([red, green, blue]),
       white: new Float32Array([1, 1, 1]),
     };
-  }, [nodes, selectedId]);
-  const neighborDots = useMemo(() => packNeighbors(nodes, edges, selectedId), [nodes, edges, selectedId]);
+  }, [nodes, selectedId, explodeOrigin, explodeAmount]);
+  const neighborDots = useMemo(
+    () => packNeighbors(nodes, edges, selectedId, explodeOrigin, explodeAmount),
+    [nodes, edges, selectedId, explodeOrigin, explodeAmount],
+  );
 
   const dimmed = focus.length > 0;
 
@@ -91,7 +110,7 @@ export function GraphLayer({ nodes, edges, selectedId, onSelect }: GraphLayerPro
           <DotCloud positions={selectedDot.position} colors={selectedDot.color} size={14} renderOrder={29} map={texture} />
         </>
       )}
-      <GraphPicker nodes={nodes} onSelect={onSelect} />
+      <GraphPicker nodes={nodes} onSelect={onSelect} explodeOrigin={explodeOrigin} explodeAmount={explodeAmount} />
     </group>
   );
 }
@@ -191,12 +210,24 @@ function DotCloud({
   );
 }
 
-function GraphPicker({ nodes, onSelect }: { nodes: PlacedNode[]; onSelect: (id: string) => void }) {
+function GraphPicker({
+  nodes,
+  onSelect,
+  explodeOrigin,
+  explodeAmount,
+}: {
+  nodes: PlacedNode[];
+  onSelect: (id: string) => void;
+  explodeOrigin: Vec3;
+  explodeAmount: number;
+}) {
   const { camera, gl } = useThree();
   const nodesRef = useRef(nodes);
   const onSelectRef = useRef(onSelect);
+  const explodeRef = useRef({ origin: explodeOrigin, amount: explodeAmount });
   nodesRef.current = nodes;
   onSelectRef.current = onSelect;
+  explodeRef.current = { origin: explodeOrigin, amount: explodeAmount };
 
   useEffect(() => {
     const canvas = gl.domElement;
@@ -209,7 +240,7 @@ function GraphPicker({ nodes, onSelect }: { nodes: PlacedNode[]; onSelect: (id: 
     };
     const onMove = (event: PointerEvent) => {
       if (Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) > 5) pointer.moved = true;
-      const hit = pickNode(event, nodesRef.current, camera, canvas);
+      const hit = pickNode(event, nodesRef.current, camera, canvas, explodeRef.current.origin, explodeRef.current.amount);
       if (hit) {
         document.body.style.cursor = "pointer";
         pointer.hovering = true;
@@ -220,7 +251,14 @@ function GraphPicker({ nodes, onSelect }: { nodes: PlacedNode[]; onSelect: (id: 
     };
     const onClick = (event: MouseEvent) => {
       if (pointer.moved) return;
-      const hit = pickNode(event, nodesRef.current, camera, canvas);
+      const hit = pickNode(
+        event,
+        nodesRef.current,
+        camera,
+        canvas,
+        explodeRef.current.origin,
+        explodeRef.current.amount,
+      );
       if (!hit) return;
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -241,7 +279,14 @@ function GraphPicker({ nodes, onSelect }: { nodes: PlacedNode[]; onSelect: (id: 
   return null;
 }
 
-function pickNode(event: MouseEvent, nodes: PlacedNode[], camera: THREE.Camera, canvas: HTMLCanvasElement): string | null {
+function pickNode(
+  event: MouseEvent,
+  nodes: PlacedNode[],
+  camera: THREE.Camera,
+  canvas: HTMLCanvasElement,
+  origin: Vec3,
+  amount: number,
+): string | null {
   const rect = canvas.getBoundingClientRect();
   if (rect.width === 0 || rect.height === 0) return null;
   const localX = event.clientX - rect.left;
@@ -250,7 +295,8 @@ function pickNode(event: MouseEvent, nodes: PlacedNode[], camera: THREE.Camera, 
   let bestId: string | null = null;
   let bestDistance = 12;
   for (const node of nodes) {
-    point.set(node.position[0], node.position[1], node.position[2]).project(camera);
+    const [x, y, z] = moved(node.position, origin, amount);
+    point.set(x, y, z).project(camera);
     if (point.z < -1 || point.z > 1) continue;
     const screenX = (point.x * 0.5 + 0.5) * rect.width;
     const screenY = (-point.y * 0.5 + 0.5) * rect.height;
@@ -263,7 +309,13 @@ function pickNode(event: MouseEvent, nodes: PlacedNode[], camera: THREE.Camera, 
   return bestId;
 }
 
-function packNeighbors(nodes: PlacedNode[], edges: PlacedEdge[], selectedId: string | null) {
+function packNeighbors(
+  nodes: PlacedNode[],
+  edges: PlacedEdge[],
+  selectedId: string | null,
+  origin: Vec3,
+  amount: number,
+) {
   if (!selectedId) return null;
   const ids = new Set<string>();
   for (const edge of edges) {
@@ -273,7 +325,7 @@ function packNeighbors(nodes: PlacedNode[], edges: PlacedEdge[], selectedId: str
   ids.delete(selectedId);
   const neighbors = nodes.filter((node) => ids.has(node.drawnId));
   if (neighbors.length === 0) return null;
-  const packed = packDots(neighbors);
+  const packed = packDots(neighbors, origin, amount);
   const ring = new Float32Array(packed.positions.length);
   const [red, green, blue] = hexToRgb("#8fd0de");
   for (let index = 0; index < ring.length; index += 3) {
@@ -284,22 +336,29 @@ function packNeighbors(nodes: PlacedNode[], edges: PlacedEdge[], selectedId: str
   return { positions: packed.positions, colors: packed.colors, ring };
 }
 
-function packDots(nodes: PlacedNode[]) {
+function moved(point: Vec3, origin: Vec3, amount: number): Vec3 {
+  const shift = explodeOffset(point, origin, amount);
+  return [point[0] + shift[0], point[1] + shift[1], point[2] + shift[2]];
+}
+
+function packDots(nodes: PlacedNode[], origin: Vec3, amount: number) {
   const positions = new Float32Array(nodes.length * 3);
   const colors = new Float32Array(nodes.length * 3);
   nodes.forEach((node, index) => {
-    positions.set(node.position, index * 3);
+    positions.set(moved(node.position, origin, amount), index * 3);
     colors.set(hexToRgb(node.color), index * 3);
   });
   const white = new Float32Array(positions.length).fill(1);
   return { positions, colors, white };
 }
 
-function packEdges(edges: PlacedEdge[]): EdgeBatch[] {
+function packEdges(edges: PlacedEdge[], origin: Vec3, amount: number): EdgeBatch[] {
   const groups = new Map<string, number[]>();
   for (const edge of edges) {
     const list = groups.get(edge.relation) ?? [];
-    list.push(edge.a[0], edge.a[1], edge.a[2], edge.b[0], edge.b[1], edge.b[2]);
+    const a = moved(edge.a, origin, amount);
+    const b = moved(edge.b, origin, amount);
+    list.push(a[0], a[1], a[2], b[0], b[1], b[2]);
     groups.set(edge.relation, list);
   }
   const order = new Map<string, number>(GRAPH_RELATIONS.map((relation, index) => [relation.id, index]));

@@ -67,6 +67,7 @@ export type DrawElement = {
     lateralM: number;
     wallLengthM: number;
     reason: string;
+    errorM: number | null;
     placedOnWall: boolean;
   };
 };
@@ -1015,6 +1016,20 @@ function pushTriangle(buffer: number[], a: Vec3, b: Vec3, c: Vec3) {
   const cz = abx * acy - aby * acx;
   if (cx * cx + cy * cy + cz * cz < 1e-12) return;
   buffer.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
+}
+
+/** Full explode slider (amount 1) shifts an element by this multiple of its vector from the model centre. */
+export const EXPLODE_GAIN = 1.5;
+
+/** Translation that moves `point` away from `origin`. Amount is 0–1 from the explode slider. */
+export function explodeOffset(point: Vec3, origin: Vec3, amount: number): Vec3 {
+  if (!(amount > 0)) return [0, 0, 0];
+  const factor = amount * EXPLODE_GAIN;
+  return [
+    (point[0] - origin[0]) * factor,
+    (point[1] - origin[1]) * factor,
+    (point[2] - origin[2]) * factor,
+  ];
 }
 
 export function boundsOf(positions: Float32Array): { min: Vec3; max: Vec3; center: Vec3 } {

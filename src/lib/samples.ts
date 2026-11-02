@@ -6,6 +6,16 @@ export type SampleModel = {
 
 export const SAMPLES: SampleModel[] = [
   {
+    id: "0360",
+    title: "GMZ-2026-0360",
+    file: "1790174736795-GMZ-2026-0360-RS-BIM-001-02.csv",
+  },
+  {
+    id: "0307",
+    title: "GMZ-2026-0307",
+    file: "1789663545795-GMZ-2026-0307-RS-BIM-001-02.csv",
+  },
+  {
     id: "0412",
     title: "GMZ-2026-0412",
     file: "1790789654315-GMZ-2026-0412-RS-BIM-001-01-1790788248538_1__36da.csv",

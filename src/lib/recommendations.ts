@@ -1,7 +1,7 @@
 import Papa from "papaparse";
 import { boundsOf, verticalColumnMesh, type DrawElement } from "@/lib/geometry";
 
-export const RECOMMENDED_TYPE = "Recommended column";
+export const RECOMMENDED_TYPE = "Predicted column";
 export const RECOMMENDED_COLOR = "#e08a12";
 export const RECOMMENDED_OUTLINE = "#7c4a0b";
 
@@ -21,6 +21,7 @@ export type ColumnRecommendation = {
   lateralM: number;
   probability: number;
   reason: string;
+  errorM: number | null;
 };
 
 export type RecommendationMode = "off" | "show" | "only";
@@ -50,6 +51,7 @@ export function parseColumnRecommendations(csvText: string): ColumnRecommendatio
       lateralM: finite(raw.lateral_m) ?? 0,
       probability: finite(raw.probability) ?? 0,
       reason: (raw.reason ?? "").trim(),
+      errorM: finite(raw.error_m),
     });
   }
   return rows;
@@ -124,7 +126,7 @@ export function buildRecommendedColumns(
           label: "Marker width",
           kind: "length",
           value: sizeFeet,
-          source: "300 mm display size. The recommendation does not size the column.",
+          source: "300 mm display size. The prediction does not size the column.",
         },
       ],
       dimensions: [],
@@ -139,6 +141,7 @@ export function buildRecommendedColumns(
         lateralM: row.lateralM,
         wallLengthM: row.wallLengthM,
         reason: row.reason,
+        errorM: row.errorM,
         placedOnWall: span.placedOnWall,
       },
     });
@@ -148,10 +151,16 @@ export function buildRecommendedColumns(
 }
 
 export function reasonText(reason: string): string {
+  if (reason === "held_out") {
+    return "Held-out building. The network did not train on this project";
+  }
+  if (reason === "training") {
+    return "Training building. The network saw this project";
+  }
   if (reason === "no_proposed_wall_or_column_in_handling_range") {
     return "No proposed wall or column in handling range";
   }
-  if (!reason) return "Recommended column";
+  if (!reason) return "Predicted column";
   return reason.replaceAll("_", " ");
 }
 
@@ -171,6 +180,10 @@ function recommendationProperties(row: ColumnRecommendation, placedOnWall: boole
     { key: "Along wall", value: alongText(row.alongParam) },
     { key: "Lateral offset", value: `${row.lateralM.toFixed(3)} m` },
     { key: "Plan position", value: `${row.xM.toFixed(3)} m, ${row.yM.toFixed(3)} m` },
+    {
+      key: "Distance to actual column",
+      value: row.errorM == null ? "This slot has no actual column" : `${row.errorM.toFixed(3)} m`,
+    },
     { key: "Wall length", value: `${row.wallLengthM.toFixed(3)} m` },
     { key: "Reason", value: reasonText(row.reason) },
     {

@@ -8,12 +8,14 @@ import {
   DEMOLISHED_COLOR,
   PHASE_LOOKS,
   STRUCTURAL_COLOR,
+  explodeOffset,
   isDemolishedValue,
   isStructuralElement,
   phaseKind,
   type DimensionLine,
   type DrawElement,
   type PhaseHighlight,
+  type Vec3,
 } from "@/lib/geometry";
 import { type PlacedEdge, type PlacedNode } from "@/lib/graph";
 import { RECOMMENDED_COLOR, RECOMMENDED_OUTLINE } from "@/lib/recommendations";
@@ -34,6 +36,8 @@ type SceneCanvasProps = {
   demolishedHighlight: boolean;
   graphNodes: PlacedNode[];
   graphEdges: PlacedEdge[];
+  /** 0 keeps the model assembled. 1 is the full explode slider. */
+  explode: number;
 };
 
 export function SceneCanvas({
@@ -50,6 +54,7 @@ export function SceneCanvas({
   demolishedHighlight,
   graphNodes,
   graphEdges,
+  explode,
 }: SceneCanvasProps) {
   const selected = useMemo(
     () =>
@@ -61,6 +66,11 @@ export function SceneCanvas({
     const span = spanOf(fitElements.length ? fitElements : restElements);
     return Math.max(80, span * 1.8);
   }, [fitElements, restElements]);
+  const origin = useMemo(
+    () => assemblyCenter(fitElements.length > 0 ? fitElements : restElements.length > 0 ? restElements : markerElements),
+    [fitElements, restElements, markerElements],
+  );
+  const selectedShift = selected ? explodeOffset(selected.center, origin, explode) : null;
 
   return (
     <Canvas
@@ -98,6 +108,8 @@ export function SceneCanvas({
           phaseHighlight={phaseHighlight}
           structuralHighlight={structuralHighlight}
           demolishedHighlight={demolishedHighlight}
+          explodeOrigin={origin}
+          explodeAmount={explode}
           onSelect={onSelect}
         />
       ))}
@@ -113,6 +125,8 @@ export function SceneCanvas({
                 phaseHighlight={phaseHighlight}
                 structuralHighlight={structuralHighlight}
                 demolishedHighlight={demolishedHighlight}
+                explodeOrigin={origin}
+                explodeAmount={explode}
                 onSelect={onSelect}
               />
             ))}
@@ -125,14 +139,23 @@ export function SceneCanvas({
                 phaseHighlight={phaseHighlight}
                 structuralHighlight={structuralHighlight}
                 demolishedHighlight={demolishedHighlight}
+                explodeOrigin={origin}
+                explodeAmount={explode}
                 onSelect={onSelect}
               />
             ))}
           </group>
         </Bounds>
       )}
-      <GraphLayer nodes={graphNodes} edges={graphEdges} selectedId={selectedId} onSelect={onSelect} />
-      {selected && <Dimensions lines={selected.dimensions} />}
+      <GraphLayer
+        nodes={graphNodes}
+        edges={graphEdges}
+        selectedId={selectedId}
+        onSelect={onSelect}
+        explodeOrigin={origin}
+        explodeAmount={explode}
+      />
+      {selected && selectedShift && <Dimensions lines={selected.dimensions} shift={selectedShift} />}
       <OrbitControls makeDefault enableDamping dampingFactor={0.14} maxPolarAngle={Math.PI * 0.92} />
     </Canvas>
   );
@@ -292,6 +315,8 @@ const ElementMesh = memo(function ElementMesh({
   phaseHighlight,
   structuralHighlight,
   demolishedHighlight,
+  explodeOrigin,
+  explodeAmount,
   onSelect,
 }: {
   element: DrawElement;
@@ -300,6 +325,8 @@ const ElementMesh = memo(function ElementMesh({
   phaseHighlight: PhaseHighlight;
   structuralHighlight: boolean;
   demolishedHighlight: boolean;
+  explodeOrigin: Vec3;
+  explodeAmount: number;
   onSelect: (id: string) => void;
 }) {
   const geometry = useMemo(() => {
@@ -321,9 +348,12 @@ const ElementMesh = memo(function ElementMesh({
   const structural = !fadeAll && structuralHighlight && isStructuralElement(element);
   const demolished = !fadeAll && demolishedHighlight && isDemolishedValue(element.demolishedValue);
 
+  const shift = explodeOffset(element.center, explodeOrigin, explodeAmount);
+
   return (
     <mesh
       geometry={geometry}
+      position={shift}
       onClick={(event) => {
         event.stopPropagation();
         onSelect(element.id);
@@ -360,18 +390,16 @@ const ElementMesh = memo(function ElementMesh({
   );
 });
 
-function Dimensions({ lines }: { lines: DimensionLine[] }) {
+function Dimensions({ lines, shift }: { lines: DimensionLine[]; shift: Vec3 }) {
   return (
     <group>
       {lines.map((line, index) => {
-        const mid: [number, number, number] = [
-          (line.a[0] + line.b[0]) / 2,
-          (line.a[1] + line.b[1]) / 2,
-          (line.a[2] + line.b[2]) / 2,
-        ];
+        const a: Vec3 = [line.a[0] + shift[0], line.a[1] + shift[1], line.a[2] + shift[2]];
+        const b: Vec3 = [line.b[0] + shift[0], line.b[1] + shift[1], line.b[2] + shift[2]];
+        const mid: Vec3 = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2];
         return (
           <group key={`${line.label}-${index}`}>
-            <Line points={[line.a, line.b]} color="#1c1917" lineWidth={1.5} />
+            <Line points={[a, b]} color="#1c1917" lineWidth={1.5} />
             <Html position={mid} center zIndexRange={[20, 0]} style={{ pointerEvents: "none" }}>
               <div className="whitespace-nowrap rounded-md bg-white/95 px-1.5 py-0.5 text-[11px] font-medium text-neutral-900 shadow-sm ring-1 ring-black/15">
                 {line.label} {formatLengthShort(line.feet)}
@@ -382,6 +410,25 @@ function Dimensions({ lines }: { lines: DimensionLine[] }) {
       })}
     </group>
   );
+}
+
+function assemblyCenter(elements: DrawElement[]): Vec3 {
+  if (elements.length === 0) return [0, 0, 0];
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
+  for (const element of elements) {
+    minX = Math.min(minX, element.min[0]);
+    minY = Math.min(minY, element.min[1]);
+    minZ = Math.min(minZ, element.min[2]);
+    maxX = Math.max(maxX, element.max[0]);
+    maxY = Math.max(maxY, element.max[1]);
+    maxZ = Math.max(maxZ, element.max[2]);
+  }
+  return [(minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2];
 }
 
 function spanOf(elements: DrawElement[]): number {
