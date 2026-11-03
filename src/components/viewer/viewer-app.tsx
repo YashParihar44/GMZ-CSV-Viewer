@@ -572,7 +572,7 @@ export function ViewerApp() {
                     <>
                       <p className="mt-0.5 text-neutral-600">
                         {recommendationMode === "only"
-                          ? `${recommendationColumns.length} predicted column${recommendationColumns.length === 1 ? "" : "s"}`
+                          ? `${recommendationColumns.length} predicted member${recommendationColumns.length === 1 ? "" : "s"}`
                           : `${visible.length} shown${recommendationMode === "show" && recommendationColumns.length > 0 ? ` · ${recommendationColumns.length} predicted` : ""}`}
                         {graphOn && graphPlacement ? ` · graph ${graphPlacement.onScreenCount} nodes, ${graphEdges.length} edges` : ""}
                         {" "}
@@ -590,7 +590,9 @@ export function ViewerApp() {
                       )}
                       {recommendationMode !== "only" && phaseHighlight === "none" && (
                         <p className="mt-1 text-neutral-600">
-                          Every element is faded. A selected element stays gold, and the elements it connects to stay teal.
+                          {structuralOn
+                            ? `Only structural elements are shown.${recommendationMode === "show" && recommendationColumns.length > 0 ? " Predicted members stay highlighted." : ""} A selected element stays gold.`
+                            : `Every element is faded.${recommendationMode === "show" && recommendationColumns.length > 0 ? " Predicted members stay highlighted." : ""} A selected element stays gold, and the elements it connects to stay teal.`}
                         </p>
                       )}
                       {recommendationMode !== "only" && model?.phaseField && phaseHighlight !== "off" && phaseHighlight !== "none" && (
@@ -609,6 +611,7 @@ export function ViewerApp() {
                           elements={visible}
                           count={structuralCount}
                           phaseOn={phaseHighlight !== "off" && phaseHighlight !== "none"}
+                          isolate={phaseHighlight === "none"}
                           demolishedOn={Boolean(model?.demolishedField) && demolishedOn}
                         />
                       )}
@@ -1269,11 +1272,11 @@ function RecommendationControl({
       )}
     >
       <p className={cn("font-medium", overlay ? "px-0.5 text-[11px] text-neutral-800" : "text-sm")}>
-        Predicted columns
+        Predicted structure
       </p>
       {!loaded ? (
         <p className={cn("mt-1 text-[11px] leading-4", overlay ? "max-w-56 text-neutral-600" : "text-muted-foreground")}>
-          Loading predicted columns…
+          Loading predicted members…
         </p>
       ) : (
         <>
@@ -1304,8 +1307,8 @@ function RecommendationControl({
           </div>
           <p className={cn("text-[11px] leading-4", overlay ? "mt-1 max-w-56 text-neutral-600" : "text-muted-foreground")}>
             {count > 0
-              ? "Show keeps the model and draws each predicted column on its demolished wall. Only hides everything else."
-              : "This file has no predicted columns. Open a held-out project, GMZ-2026-0360 or GMZ-2026-0307."}
+              ? "Show keeps the model and draws each predicted member on its demolished wall. Only hides everything else."
+              : "This verified file has no removal-check predictions. Open GMZ-2026-0360 to see the members that were deleted and predicted back."}
           </p>
         </>
       )}
@@ -1475,7 +1478,7 @@ function GraphMembershipPanel({
     return (
       <div>
         <h3 className="text-sm font-medium">Graph</h3>
-        <p className="mt-1 text-xs leading-5 text-muted-foreground">Predicted columns are markers, not nodes in the graph.</p>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">Predicted members are markers, not nodes in the graph.</p>
       </div>
     );
   }
@@ -1744,11 +1747,13 @@ function StructuralLegend({
   elements,
   count,
   phaseOn,
+  isolate,
   demolishedOn,
 }: {
   elements: DrawElement[];
   count: number;
   phaseOn: boolean;
+  isolate: boolean;
   demolishedOn: boolean;
 }) {
   const rule = structuralRuleText(elements);
@@ -1760,9 +1765,11 @@ function StructuralLegend({
         <span>Structural {count}</span>
       </p>
       <p className="mt-1 text-[11px] leading-4 text-neutral-500">
-        {combined
-          ? `Red outline. ${rule}. Fill stays with the other highlight.`
-          : `Red fill and outline. ${rule}. Other elements keep their current color.`}
+        {isolate
+          ? `Only these elements are drawn. Red fill and outline. ${rule}.`
+          : combined
+            ? `Red outline. ${rule}. Fill stays with the other highlight.`
+            : `Red fill and outline. ${rule}. Other elements keep their current color.`}
       </p>
     </div>
   );
@@ -1787,13 +1794,16 @@ function DemolishedLegend({
     return [...names].sort((a, b) => a.localeCompare(b));
   }, [elements]);
   const fadeOthers = phaseHighlight === "off" || phaseHighlight === "proposed";
-  const note = fadeOthers
-    ? phaseHighlight === "proposed"
-      ? "Teal fill, unless the row is also Proposed — those keep the purple fill and a teal outline. Other elements are faded."
-      : structuralOn
-        ? "Teal fill and outline. Other elements are faded. A red outline is structural."
-        : "Teal fill and outline. Other elements are faded."
-    : "Teal outline. None and blank stay in their current color. A red outline, when on, is structural.";
+  const note =
+    phaseHighlight === "existing"
+      ? "Faded, along with Proposed and New Construction."
+      : fadeOthers
+        ? phaseHighlight === "proposed"
+          ? "Teal fill, unless the row is also Proposed — those keep the purple fill and a teal outline. Other elements are faded."
+          : structuralOn
+            ? "Teal fill and outline. Other elements are faded. A red outline is structural."
+            : "Teal fill and outline. Other elements are faded."
+        : "Teal outline. None and blank stay in their current color. A red outline, when on, is structural.";
   return (
     <div className="mt-2 border-t border-neutral-200 pt-2">
       <p className="flex items-center gap-1.5">
@@ -1821,7 +1831,7 @@ function PhaseLegend({ elements, mode }: { elements: DrawElement[]; mode: PhaseH
     mode === "both"
       ? [{ kind: "existing" }, { kind: "proposed", note: "Includes New Construction." }, { kind: "unmarked" }]
       : mode === "existing"
-        ? [{ kind: "existing" }, { kind: "unmarked", note: "Proposed and New Construction stay in their category color." }]
+        ? [{ kind: "existing" }, { kind: "unmarked", note: "Proposed, New Construction, and demolished elements are faded." }]
         : [{ kind: "proposed", note: "Includes New Construction. Other elements are faded." }];
 
   return (

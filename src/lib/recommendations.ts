@@ -1,8 +1,10 @@
 import Papa from "papaparse";
-import { boundsOf, verticalColumnMesh, type DrawElement } from "@/lib/geometry";
+import { boundsOf, horizontalBeamMesh, verticalColumnMesh, type DrawElement } from "@/lib/geometry";
 
 export const RECOMMENDED_TYPE = "Predicted column";
+export const RECOMMENDED_BEAM_TYPE = "Predicted beam";
 export const RECOMMENDED_COLOR = "#e08a12";
+export const RECOMMENDED_BEAM_COLOR = "#2f6f8f";
 export const RECOMMENDED_OUTLINE = "#7c4a0b";
 
 /** Recommendation plan coordinates are metres. The viewer draws Revit feet. */
@@ -15,6 +17,9 @@ export type ColumnRecommendation = {
   wallId: string;
   wallLengthM: number;
   slot: string;
+  elementKind: "column" | "beam";
+  dirX: number;
+  dirY: number;
   xM: number;
   yM: number;
   alongParam: number;
@@ -45,6 +50,9 @@ export function parseColumnRecommendations(csvText: string): ColumnRecommendatio
       wallId,
       wallLengthM: finite(raw.wall_length_m) ?? 0,
       slot: (raw.slot ?? "").trim() || "mid",
+      elementKind: (raw.element_kind ?? "").trim() === "beam" || (raw.slot ?? "").trim() === "beam" ? "beam" : "column",
+      dirX: finite(raw.dir_x) ?? 1,
+      dirY: finite(raw.dir_y) ?? 0,
       xM,
       yM,
       alongParam: finite(raw.along_param) ?? 0,
@@ -85,7 +93,10 @@ export function buildRecommendedColumns(
     const yFeet = row.yM * METRES_TO_FEET;
     const host = findHost(elements, row.wallId);
     const span = columnSpan(host, elements, xFeet, yFeet);
-    const positions = verticalColumnMesh(xFeet, yFeet, span.z0, span.z1, sizeFeet);
+    const beam = row.elementKind === "beam";
+    const positions = beam
+      ? horizontalBeamMesh(xFeet, yFeet, span.z0, span.z1, row.dirX, row.dirY, row.wallLengthM * METRES_TO_FEET, sizeFeet)
+      : verticalColumnMesh(xFeet, yFeet, span.z0, span.z1, sizeFeet);
     if (!positions) continue;
 
     const key = `${row.wallId}:${row.slot}`;
@@ -98,7 +109,7 @@ export function buildRecommendedColumns(
 
     columns.push({
       id,
-      elementType: RECOMMENDED_TYPE,
+      elementType: beam ? RECOMMENDED_BEAM_TYPE : RECOMMENDED_TYPE,
       categoryId: "",
       family: "",
       typeName: `${slotLabel} · ${Math.round(row.probability * 100)}%`,
@@ -111,7 +122,7 @@ export function buildRecommendedColumns(
       structuralField: null,
       structuralValue: "",
       positions,
-      color: RECOMMENDED_COLOR,
+      color: beam ? RECOMMENDED_BEAM_COLOR : RECOMMENDED_COLOR,
       opacity: 1,
       metalness: 0.08,
       roughness: 0.42,
@@ -151,6 +162,9 @@ export function buildRecommendedColumns(
 }
 
 export function reasonText(reason: string): string {
+  if (reason === "removal_check") {
+    return "Removal check. This member was deleted from a verified model, then predicted back";
+  }
   if (reason === "held_out") {
     return "Held-out building. The network did not train on this project";
   }
@@ -168,6 +182,7 @@ export function slotName(slot: string): string {
   if (slot === "start") return "Start";
   if (slot === "end") return "End";
   if (slot === "mid") return "Middle";
+  if (slot === "beam") return "Beam";
   return slot;
 }
 
@@ -181,8 +196,8 @@ function recommendationProperties(row: ColumnRecommendation, placedOnWall: boole
     { key: "Lateral offset", value: `${row.lateralM.toFixed(3)} m` },
     { key: "Plan position", value: `${row.xM.toFixed(3)} m, ${row.yM.toFixed(3)} m` },
     {
-      key: "Distance to actual column",
-      value: row.errorM == null ? "This slot has no actual column" : `${row.errorM.toFixed(3)} m`,
+      key: "Distance to verified member",
+      value: row.errorM == null ? "This wall has no verified member in this slot" : `${row.errorM.toFixed(3)} m`,
     },
     { key: "Wall length", value: `${row.wallLengthM.toFixed(3)} m` },
     { key: "Reason", value: reasonText(row.reason) },

@@ -960,6 +960,33 @@ export function verticalColumnMesh(
   return boxPositions(center, [1, 0, 0], [0, 1, 0], [0, 0, 1], half, half, height / 2);
 }
 
+/** A beam marker lies along the demolished wall, up in the storey it supports. */
+export function horizontalBeamMesh(
+  xFeet: number,
+  yFeet: number,
+  zBaseFeet: number,
+  zTopFeet: number,
+  dirX: number,
+  dirY: number,
+  lengthFeet: number,
+  depthFeet: number,
+): Float32Array | null {
+  const storey = zTopFeet - zBaseFeet;
+  if (!(storey >= 0.05) || !(depthFeet >= 0.02)) return null;
+  const span = Math.max(lengthFeet, depthFeet * 3);
+  const norm = Math.hypot(dirX, dirY) || 1;
+  const beamHeight = Math.min(depthFeet, storey * 0.28);
+  return boxPositions(
+    [xFeet, yFeet, zTopFeet - beamHeight],
+    [dirX / norm, dirY / norm, 0],
+    [-dirY / norm, dirX / norm, 0],
+    [0, 0, 1],
+    span / 2,
+    depthFeet / 2,
+    beamHeight / 2,
+  );
+}
+
 function boxPositions(
   center: Vec3,
   axisU: Vec3,

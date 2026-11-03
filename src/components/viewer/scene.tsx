@@ -18,7 +18,7 @@ import {
   type Vec3,
 } from "@/lib/geometry";
 import { type PlacedEdge, type PlacedNode } from "@/lib/graph";
-import { RECOMMENDED_COLOR, RECOMMENDED_OUTLINE } from "@/lib/recommendations";
+import { RECOMMENDED_OUTLINE } from "@/lib/recommendations";
 import { formatLengthShort } from "@/lib/units";
 import { GraphLayer } from "@/components/viewer/graph-layer";
 
@@ -225,21 +225,39 @@ function meshLook(
       opacity: 1,
     };
   }
-  if (phaseHighlight === "none") return ghostLook(element);
+  // Predicted members stay solid when None, Proposed, or Demolished fades the rest of the model.
   if (element.recommendation) {
+    const beam = element.elementType === "Predicted beam";
     return {
-      color: RECOMMENDED_COLOR,
-      emissive: "#9a5b08",
+      color: element.color,
+      emissive: beam ? "#1d4e63" : "#9a5b08",
       emissiveIntensity: 0.28,
       roughness: 0.42,
       metalness: 0.08,
       opacity: 1,
     };
   }
+  if (phaseHighlight === "none") {
+    if (structuralHighlight && isStructuralElement(element)) {
+      return {
+        color: STRUCTURAL_COLOR,
+        emissive: "#000000",
+        emissiveIntensity: 0,
+        roughness: 0.48,
+        metalness: 0.04,
+        opacity: 1,
+      };
+    }
+    return ghostLook(element);
+  }
   const kind = phaseKind(element.phaseValue);
   const proposedFocus = phaseHighlight === "proposed";
   const demolishedMatch = demolishedHighlight && isDemolishedValue(element.demolishedValue);
-  // Existing and Both keep their own colors. Proposed and Demolished fade everything that is not a match.
+  // Existing keeps its own elements solid and fades proposed and demolished rows, the same ghost used by the other phase filters.
+  if (phaseHighlight === "existing" && (kind === "proposed" || isDemolishedValue(element.demolishedValue))) {
+    return ghostLook(element);
+  }
+  // Both keeps its own colors. Proposed and Demolished fade everything that is not a match.
   const fadeOthers = proposedFocus || (demolishedHighlight && phaseHighlight !== "existing" && phaseHighlight !== "both");
   if (fadeOthers) {
     if (proposedFocus && kind === "proposed") {
@@ -344,19 +362,25 @@ const ElementMesh = memo(function ElementMesh({
   const opening = element.elementType === "Window" || element.elementType === "Door";
   const recommended = Boolean(element.recommendation);
   const look = meshLook(element, selected, linked, phaseHighlight, structuralHighlight, demolishedHighlight);
-  const fadeAll = phaseHighlight === "none";
+  const structuralOnly = phaseHighlight === "none" && structuralHighlight;
+  const fadeAll = phaseHighlight === "none" && !structuralOnly;
   const structural = !fadeAll && structuralHighlight && isStructuralElement(element);
   const demolished = !fadeAll && demolishedHighlight && isDemolishedValue(element.demolishedValue);
+  if (structuralOnly && !selected && !recommended && !isStructuralElement(element)) return null;
 
   const shift = explodeOffset(element.center, explodeOrigin, explodeAmount);
+  // Faded ghosts stay visible, but a click should land on the solid element behind them.
+  const pickable = look.opacity > GHOST_OPACITY;
 
   return (
     <mesh
       geometry={geometry}
       position={shift}
+      userData={{ elementId: element.id, pickable }}
       onClick={(event) => {
         event.stopPropagation();
-        onSelect(element.id);
+        const id = pickClickedElement(event.intersections);
+        if (id) onSelect(id);
       }}
       onPointerOver={(event) => {
         event.stopPropagation();
@@ -381,7 +405,7 @@ const ElementMesh = memo(function ElementMesh({
         polygonOffsetFactor={recommended ? -4 : opening ? -2 : 0}
         polygonOffsetUnits={recommended ? -4 : opening ? -2 : 0}
       />
-      {recommended && !selected && !fadeAll && <Edges threshold={20} color={RECOMMENDED_OUTLINE} />}
+      {recommended && !selected && <Edges threshold={20} color={RECOMMENDED_OUTLINE} />}
       {demolished && <Outlines color={DEMOLISHED_COLOR} thickness={8} screenspace={false} angle={Math.PI} />}
       {structural && <Outlines color={STRUCTURAL_COLOR} thickness={3} screenspace={false} angle={Math.PI} />}
       {linked && !selected && <Edges threshold={18} color={LINKED_OUTLINE} />}
@@ -410,6 +434,32 @@ function Dimensions({ lines, shift }: { lines: DimensionLine[]; shift: Vec3 }) {
       })}
     </group>
   );
+}
+
+/** Nearest solid element along the ray. A faded element is used only when nothing solid is under the cursor. */
+function pickClickedElement(intersections: THREE.Intersection[]): string | null {
+  let dimmedId: string | null = null;
+  const seen = new Set<string>();
+  for (const hit of intersections) {
+    const pick = elementPick(hit.object);
+    if (!pick || seen.has(pick.id)) continue;
+    seen.add(pick.id);
+    if (pick.pickable) return pick.id;
+    dimmedId ??= pick.id;
+  }
+  return dimmedId;
+}
+
+function elementPick(object: THREE.Object3D): { id: string; pickable: boolean } | null {
+  let current: THREE.Object3D | null = object;
+  while (current) {
+    const id = current.userData.elementId;
+    if (typeof id === "string") {
+      return { id, pickable: current.userData.pickable !== false };
+    }
+    current = current.parent;
+  }
+  return null;
 }
 
 function assemblyCenter(elements: DrawElement[]): Vec3 {
