@@ -60,6 +60,8 @@ export type PlacedNode = {
   graphId: string;
   drawnId: string;
   position: [number, number, number];
+  /** Element centre. Explode moves the dot with the solid, even when `position` was pulled onto a face. */
+  anchor: [number, number, number];
   color: string;
   elementType: string;
   typeLabel: string;
@@ -73,6 +75,9 @@ export type PlacedEdge = {
   dstDrawnId: string;
   a: [number, number, number];
   b: [number, number, number];
+  /** Centres of the two solids. Explode uses these, matching the mesh translation. */
+  anchorA: [number, number, number];
+  anchorB: [number, number, number];
 };
 
 export type GraphPlacement = {
@@ -213,6 +218,7 @@ export function placeGraph(graph: ProjectGraph, modelElements: Placeable[], visi
       graphId: node.elementId,
       drawnId: drawn.id,
       position: drawn.center,
+      anchor: drawn.center,
       color: type.color,
       elementType: node.elementType,
       typeLabel: type.label,
@@ -240,6 +246,8 @@ export function placeGraph(graph: ProjectGraph, modelElements: Placeable[], visi
       dstDrawnId: dst.drawnId,
       a: src.position,
       b: dst.position,
+      anchorA: src.position,
+      anchorB: dst.position,
     });
   }
 

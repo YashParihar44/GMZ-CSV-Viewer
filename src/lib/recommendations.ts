@@ -95,7 +95,15 @@ export function buildRecommendedColumns(
     const span = columnSpan(host, elements, xFeet, yFeet);
     const beam = row.elementKind === "beam";
     const positions = beam
-      ? horizontalBeamMesh(xFeet, yFeet, span.z0, span.z1, row.dirX, row.dirY, row.wallLengthM * METRES_TO_FEET, sizeFeet)
+      ? horizontalBeamMesh(
+          ...beamCenterFeet(row, xFeet, yFeet),
+          span.z0,
+          span.z1,
+          row.dirX,
+          row.dirY,
+          row.wallLengthM * METRES_TO_FEET,
+          sizeFeet,
+        )
       : verticalColumnMesh(xFeet, yFeet, span.z0, span.z1, sizeFeet);
     if (!positions) continue;
 
@@ -168,8 +176,14 @@ export function reasonText(reason: string): string {
   if (reason === "held_out") {
     return "Held-out building. The network did not train on this project";
   }
-  if (reason === "training") {
+  if (reason === "training" || reason === "training_set") {
     return "Training building. The network saw this project";
+  }
+  if (reason === "trained_members_removed") {
+    return "This building was in training with its beams and columns. They are removed in this file, then predicted back";
+  }
+  if (reason === "new_file_without_members") {
+    return "New building. This file has no beams or columns, and the network did not train on it";
   }
   if (reason === "no_proposed_wall_or_column_in_handling_range") {
     return "No proposed wall or column in handling range";
@@ -184,6 +198,14 @@ export function slotName(slot: string): string {
   if (slot === "mid") return "Middle";
   if (slot === "beam") return "Beam";
   return slot;
+}
+
+/** The predicted point sits near one end of the beam. The bar runs the whole wall. */
+function beamCenterFeet(row: ColumnRecommendation, xFeet: number, yFeet: number): [number, number] {
+  const lengthFeet = row.wallLengthM * METRES_TO_FEET;
+  const norm = Math.hypot(row.dirX, row.dirY) || 1;
+  const shift = lengthFeet * (0.5 - row.alongParam);
+  return [xFeet + (row.dirX / norm) * shift, yFeet + (row.dirY / norm) * shift];
 }
 
 function recommendationProperties(row: ColumnRecommendation, placedOnWall: boolean): DrawElement["properties"] {

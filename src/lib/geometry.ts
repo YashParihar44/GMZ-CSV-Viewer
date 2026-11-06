@@ -960,7 +960,7 @@ export function verticalColumnMesh(
   return boxPositions(center, [1, 0, 0], [0, 1, 0], [0, 0, 1], half, half, height / 2);
 }
 
-/** A beam marker lies along the demolished wall, up in the storey it supports. */
+/** A beam marker lies along the wall. x and y are the centre of that bar, not its start. */
 export function horizontalBeamMesh(
   xFeet: number,
   yFeet: number,

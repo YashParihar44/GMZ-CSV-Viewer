@@ -1,8 +1,8 @@
 "use client";
 
 import { Bounds, Edges, Grid, Html, Line, OrbitControls, Outlines } from "@react-three/drei";
-import { Canvas } from "@react-three/fiber";
-import { memo, useEffect, useMemo } from "react";
+import { Canvas, useThree } from "@react-three/fiber";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, type ComponentProps, type MutableRefObject } from "react";
 import * as THREE from "three";
 import {
   DEMOLISHED_COLOR,
@@ -71,13 +71,28 @@ export function SceneCanvas({
     [fitElements, restElements, markerElements],
   );
   const selectedShift = selected ? explodeOffset(selected.center, origin, explode) : null;
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
+  const graphMiss = useRef<string | null>(null);
+  const structuralPickIds = useMemo(() => {
+    if (!structuralHighlight) return null;
+    const ids = new Set<string>();
+    for (const element of [...fitElements, ...restElements, ...markerElements]) {
+      if (element.recommendation || isStructuralElement(element)) ids.add(element.id);
+    }
+    return ids;
+  }, [structuralHighlight, fitElements, restElements, markerElements]);
 
   return (
     <Canvas
       camera={{ position: [24, 18, 24], fov: 42, near: 0.15, far: 8000 }}
       dpr={[1, 1.75]}
       gl={{ antialias: true, alpha: false }}
-      onPointerMissed={() => onSelect(null)}
+      onPointerMissed={() => {
+        const hit = graphMiss.current;
+        graphMiss.current = null;
+        onSelect(hit);
+      }}
       style={{ width: "100%", height: "100%", touchAction: "none" }}
     >
       <color attach="background" args={["#d5dee6"]} />
@@ -111,6 +126,9 @@ export function SceneCanvas({
           explodeOrigin={origin}
           explodeAmount={explode}
           onSelect={onSelect}
+          preferStructural={structuralHighlight}
+          selectedIdRef={selectedIdRef}
+          graphMiss={graphMiss}
         />
       ))}
       {(fitElements.length > 0 || markerElements.length > 0) && (
@@ -128,6 +146,9 @@ export function SceneCanvas({
                 explodeOrigin={origin}
                 explodeAmount={explode}
                 onSelect={onSelect}
+                preferStructural={structuralHighlight}
+                selectedIdRef={selectedIdRef}
+                graphMiss={graphMiss}
               />
             ))}
             {markerElements.map((element) => (
@@ -142,6 +163,9 @@ export function SceneCanvas({
                 explodeOrigin={origin}
                 explodeAmount={explode}
                 onSelect={onSelect}
+                preferStructural={structuralHighlight}
+                selectedIdRef={selectedIdRef}
+                graphMiss={graphMiss}
               />
             ))}
           </group>
@@ -151,7 +175,8 @@ export function SceneCanvas({
         nodes={graphNodes}
         edges={graphEdges}
         selectedId={selectedId}
-        onSelect={onSelect}
+        graphMiss={graphMiss}
+        pickIds={structuralPickIds}
         explodeOrigin={origin}
         explodeAmount={explode}
       />
@@ -336,6 +361,9 @@ const ElementMesh = memo(function ElementMesh({
   explodeOrigin,
   explodeAmount,
   onSelect,
+  preferStructural,
+  selectedIdRef,
+  graphMiss,
 }: {
   element: DrawElement;
   selected: boolean;
@@ -346,7 +374,14 @@ const ElementMesh = memo(function ElementMesh({
   explodeOrigin: Vec3;
   explodeAmount: number;
   onSelect: (id: string) => void;
+  /** Structural highlight is on, so a beam behind a wall should win the click. */
+  preferStructural: boolean;
+  selectedIdRef: MutableRefObject<string | null>;
+  graphMiss: MutableRefObject<string | null>;
 }) {
+  const meshRef = useRef<THREE.Mesh>(null);
+  const { size } = useThree();
+  const structuralMember = isStructuralElement(element);
   const geometry = useMemo(() => {
     const buffer = new THREE.BufferGeometry();
     buffer.setAttribute("position", new THREE.BufferAttribute(element.positions, 3));
@@ -358,6 +393,19 @@ const ElementMesh = memo(function ElementMesh({
   useEffect(() => {
     return () => geometry.dispose();
   }, [geometry]);
+
+  useLayoutEffect(() => {
+    const mesh = meshRef.current;
+    if (!mesh) return;
+    if (!structuralMember) {
+      mesh.raycast = THREE.Mesh.prototype.raycast;
+      return;
+    }
+    const viewportHeight = size.height;
+    mesh.raycast = (raycaster, intersects) => {
+      raycastMeshWithPixelSlack(mesh, raycaster, intersects, viewportHeight, 8);
+    };
+  }, [structuralMember, size.height]);
 
   const opening = element.elementType === "Window" || element.elementType === "Door";
   const recommended = Boolean(element.recommendation);
@@ -374,12 +422,14 @@ const ElementMesh = memo(function ElementMesh({
 
   return (
     <mesh
+      ref={meshRef}
       geometry={geometry}
       position={shift}
-      userData={{ elementId: element.id, pickable }}
+      userData={{ elementId: element.id, pickable, structural: structuralMember }}
       onClick={(event) => {
         event.stopPropagation();
-        const id = pickClickedElement(event.intersections);
+        graphMiss.current = null;
+        const id = pickClickedElement(event.intersections, preferStructural, selectedIdRef.current);
         if (id) onSelect(id);
       }}
       onPointerOver={(event) => {
@@ -406,8 +456,8 @@ const ElementMesh = memo(function ElementMesh({
         polygonOffsetUnits={recommended ? -4 : opening ? -2 : 0}
       />
       {recommended && !selected && <Edges threshold={20} color={RECOMMENDED_OUTLINE} />}
-      {demolished && <Outlines color={DEMOLISHED_COLOR} thickness={8} screenspace={false} angle={Math.PI} />}
-      {structural && <Outlines color={STRUCTURAL_COLOR} thickness={3} screenspace={false} angle={Math.PI} />}
+      {demolished && <SilentOutline color={DEMOLISHED_COLOR} thickness={8} screenspace={false} angle={0} />}
+      {structural && <SilentOutline color={STRUCTURAL_COLOR} thickness={3} screenspace={false} angle={0} />}
       {linked && !selected && <Edges threshold={18} color={LINKED_OUTLINE} />}
       {selected && <Edges threshold={22} color="#3a2a12" />}
     </mesh>
@@ -436,30 +486,112 @@ function Dimensions({ lines, shift }: { lines: DimensionLine[]; shift: Vec3 }) {
   );
 }
 
-/** Nearest solid element along the ray. A faded element is used only when nothing solid is under the cursor. */
-function pickClickedElement(intersections: THREE.Intersection[]): string | null {
-  let dimmedId: string | null = null;
+/**
+ * Nearest solid element along the ray. A faded element is used only when nothing solid is under the cursor.
+ * With structural highlight on, a structural member on the ray wins over the wall in front of it.
+ * Clicking the element that is already selected steps to the next one on the same ray.
+ */
+function pickClickedElement(
+  intersections: THREE.Intersection[],
+  preferStructural: boolean,
+  currentId: string | null,
+): string | null {
+  const ordered: { id: string; pickable: boolean; structural: boolean }[] = [];
   const seen = new Set<string>();
   for (const hit of intersections) {
     const pick = elementPick(hit.object);
     if (!pick || seen.has(pick.id)) continue;
     seen.add(pick.id);
-    if (pick.pickable) return pick.id;
-    dimmedId ??= pick.id;
+    ordered.push(pick);
   }
-  return dimmedId;
+  const solid = ordered.filter((item) => item.pickable);
+  const pool = solid.length > 0 ? solid : ordered;
+  const structural = pool.filter((item) => item.structural);
+  const list = preferStructural && structural.length > 0 ? structural : pool;
+  if (list.length === 0) return null;
+  if (currentId) {
+    const index = list.findIndex((item) => item.id === currentId);
+    if (index >= 0) return list[(index + 1) % list.length].id;
+  }
+  return list[0].id;
 }
 
-function elementPick(object: THREE.Object3D): { id: string; pickable: boolean } | null {
+function elementPick(object: THREE.Object3D): { id: string; pickable: boolean; structural: boolean } | null {
   let current: THREE.Object3D | null = object;
   while (current) {
     const id = current.userData.elementId;
     if (typeof id === "string") {
-      return { id, pickable: current.userData.pickable !== false };
+      return {
+        id,
+        pickable: current.userData.pickable !== false,
+        structural: current.userData.structural === true,
+      };
     }
     current = current.parent;
   }
   return null;
+}
+
+/** Outline meshes sit outside the solid and would steal the click. Keep them visual only. */
+function SilentOutline(props: ComponentProps<typeof Outlines>) {
+  const ref = useRef<THREE.Group>(null);
+  useLayoutEffect(() => {
+    const group = ref.current;
+    if (!group) return;
+    const silence = (object: THREE.Object3D) => {
+      object.raycast = () => null;
+    };
+    silence(group);
+    group.traverse(silence);
+  });
+  return (
+    <group ref={ref}>
+      <Outlines {...props} />
+    </group>
+  );
+}
+
+const _localRay = new THREE.Ray();
+const _localHit = new THREE.Vector3();
+const _slackBox = new THREE.Box3();
+const _worldCenter = new THREE.Vector3();
+const _inverseMatrix = new THREE.Matrix4();
+
+/** A thin beam is only a few pixels wide. Count a click that lands within `slackPixels` of its box. */
+function raycastMeshWithPixelSlack(
+  mesh: THREE.Mesh,
+  raycaster: THREE.Raycaster,
+  intersects: THREE.Intersection[],
+  viewportHeight: number,
+  slackPixels: number,
+) {
+  const before = intersects.length;
+  THREE.Mesh.prototype.raycast.call(mesh, raycaster, intersects);
+  if (intersects.length > before) return;
+
+  const geometry = mesh.geometry;
+  if (!geometry.boundingBox) geometry.computeBoundingBox();
+  const bounds = geometry.boundingBox;
+  const camera = raycaster.camera;
+  if (!bounds || !camera || viewportHeight <= 0) return;
+
+  bounds.getCenter(_worldCenter).applyMatrix4(mesh.matrixWorld);
+  const distance = Math.max(raycaster.ray.origin.distanceTo(_worldCenter), 0.5);
+  let worldPerPixel = 0.05;
+  if (camera instanceof THREE.PerspectiveCamera) {
+    const height = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * distance;
+    worldPerPixel = height / viewportHeight;
+  }
+  _slackBox.copy(bounds).expandByScalar(slackPixels * worldPerPixel);
+  _inverseMatrix.copy(mesh.matrixWorld).invert();
+  _localRay.copy(raycaster.ray).applyMatrix4(_inverseMatrix);
+  if (!_localRay.intersectBox(_slackBox, _localHit)) return;
+  const point = _localHit.clone().applyMatrix4(mesh.matrixWorld);
+  intersects.push({
+    distance: raycaster.ray.origin.distanceTo(point),
+    point,
+    object: mesh,
+  });
 }
 
 function assemblyCenter(elements: DrawElement[]): Vec3 {

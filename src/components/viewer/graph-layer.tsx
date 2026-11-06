@@ -2,7 +2,7 @@
 
 import { Line } from "@react-three/drei";
 import { useThree } from "@react-three/fiber";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, type MutableRefObject } from "react";
 import * as THREE from "three";
 import { explodeOffset, type Vec3 } from "@/lib/geometry";
 import { GRAPH_RELATIONS, relationStyle, type PlacedEdge, type PlacedNode } from "@/lib/graph";
@@ -11,7 +11,10 @@ type GraphLayerProps = {
   nodes: PlacedNode[];
   edges: PlacedEdge[];
   selectedId: string | null;
-  onSelect: (id: string) => void;
+  /** Set when a click misses every solid, so the nearest graph dot can still be selected. */
+  graphMiss: MutableRefObject<string | null>;
+  /** When set, a missed click only selects these ids. Null allows every node. */
+  pickIds: Set<string> | null;
   explodeOrigin: Vec3;
   explodeAmount: number;
 };
@@ -26,7 +29,8 @@ export function GraphLayer({
   nodes,
   edges,
   selectedId,
-  onSelect,
+  graphMiss,
+  pickIds,
   explodeOrigin,
   explodeAmount,
 }: GraphLayerProps) {
@@ -51,7 +55,7 @@ export function GraphLayer({
     if (!node) return null;
     const [red, green, blue] = hexToRgb(node.color);
     return {
-      position: new Float32Array(moved(node.position, explodeOrigin, explodeAmount)),
+      position: new Float32Array(shifted(node.position, node.anchor, explodeOrigin, explodeAmount)),
       color: new Float32Array([red, green, blue]),
       white: new Float32Array([1, 1, 1]),
     };
@@ -110,7 +114,7 @@ export function GraphLayer({
           <DotCloud positions={selectedDot.position} colors={selectedDot.color} size={14} renderOrder={29} map={texture} />
         </>
       )}
-      <GraphPicker nodes={nodes} onSelect={onSelect} explodeOrigin={explodeOrigin} explodeAmount={explodeAmount} />
+      <GraphPicker nodes={nodes} graphMiss={graphMiss} pickIds={pickIds} explodeOrigin={explodeOrigin} explodeAmount={explodeAmount} />
     </group>
   );
 }
@@ -212,21 +216,23 @@ function DotCloud({
 
 function GraphPicker({
   nodes,
-  onSelect,
+  graphMiss,
+  pickIds,
   explodeOrigin,
   explodeAmount,
 }: {
   nodes: PlacedNode[];
-  onSelect: (id: string) => void;
+  graphMiss: MutableRefObject<string | null>;
+  pickIds: Set<string> | null;
   explodeOrigin: Vec3;
   explodeAmount: number;
 }) {
   const { camera, gl } = useThree();
   const nodesRef = useRef(nodes);
-  const onSelectRef = useRef(onSelect);
+  const pickIdsRef = useRef(pickIds);
   const explodeRef = useRef({ origin: explodeOrigin, amount: explodeAmount });
   nodesRef.current = nodes;
-  onSelectRef.current = onSelect;
+  pickIdsRef.current = pickIds;
   explodeRef.current = { origin: explodeOrigin, amount: explodeAmount };
 
   useEffect(() => {
@@ -250,7 +256,10 @@ function GraphPicker({
       }
     };
     const onClick = (event: MouseEvent) => {
-      if (pointer.moved) return;
+      if (pointer.moved) {
+        graphMiss.current = null;
+        return;
+      }
       const hit = pickNode(
         event,
         nodesRef.current,
@@ -259,10 +268,9 @@ function GraphPicker({
         explodeRef.current.origin,
         explodeRef.current.amount,
       );
-      if (!hit) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      onSelectRef.current(hit);
+      const allowed = pickIdsRef.current;
+      // The solid under the cursor handles its own click. This is only used when that click misses.
+      graphMiss.current = hit && (!allowed || allowed.has(hit)) ? hit : null;
     };
 
     canvas.addEventListener("pointerdown", onDown, true);
@@ -274,7 +282,7 @@ function GraphPicker({
       canvas.removeEventListener("click", onClick, true);
       if (pointer.hovering) document.body.style.cursor = "";
     };
-  }, [camera, gl]);
+  }, [camera, gl, graphMiss]);
 
   return null;
 }
@@ -295,7 +303,7 @@ function pickNode(
   let bestId: string | null = null;
   let bestDistance = 12;
   for (const node of nodes) {
-    const [x, y, z] = moved(node.position, origin, amount);
+    const [x, y, z] = shifted(node.position, node.anchor, origin, amount);
     point.set(x, y, z).project(camera);
     if (point.z < -1 || point.z > 1) continue;
     const screenX = (point.x * 0.5 + 0.5) * rect.width;
@@ -336,8 +344,8 @@ function packNeighbors(
   return { positions: packed.positions, colors: packed.colors, ring };
 }
 
-function moved(point: Vec3, origin: Vec3, amount: number): Vec3 {
-  const shift = explodeOffset(point, origin, amount);
+function shifted(point: Vec3, anchor: Vec3, origin: Vec3, amount: number): Vec3 {
+  const shift = explodeOffset(anchor, origin, amount);
   return [point[0] + shift[0], point[1] + shift[1], point[2] + shift[2]];
 }
 
@@ -345,7 +353,7 @@ function packDots(nodes: PlacedNode[], origin: Vec3, amount: number) {
   const positions = new Float32Array(nodes.length * 3);
   const colors = new Float32Array(nodes.length * 3);
   nodes.forEach((node, index) => {
-    positions.set(moved(node.position, origin, amount), index * 3);
+    positions.set(shifted(node.position, node.anchor, origin, amount), index * 3);
     colors.set(hexToRgb(node.color), index * 3);
   });
   const white = new Float32Array(positions.length).fill(1);
@@ -356,8 +364,8 @@ function packEdges(edges: PlacedEdge[], origin: Vec3, amount: number): EdgeBatch
   const groups = new Map<string, number[]>();
   for (const edge of edges) {
     const list = groups.get(edge.relation) ?? [];
-    const a = moved(edge.a, origin, amount);
-    const b = moved(edge.b, origin, amount);
+    const a = shifted(edge.a, edge.anchorA, origin, amount);
+    const b = shifted(edge.b, edge.anchorB, origin, amount);
     list.push(a[0], a[1], a[2], b[0], b[1], b[2]);
     groups.set(edge.relation, list);
   }
